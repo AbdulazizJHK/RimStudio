@@ -37,15 +37,55 @@ you re-run the main auto over a grade you have settled.
 
 ## Install
 
-1. Put this folder anywhere. `Documents\Photoshop Scripts` is the usual home.
-2. Python 3.10+ with `numpy` and `Pillow`.
-3. For a permanent menu entry, copy `RimStudio.jsx` into
+Windows, Photoshop CC 2019 or newer. Open PowerShell and paste:
+
+```powershell
+irm https://raw.githubusercontent.com/AbdulazizJHK/RimStudio/main/install.ps1 | iex
+```
+
+Already downloaded the ZIP? Unzip it and **double-click `Install RimStudio.bat`**.
+
+Then restart Photoshop. The tool is at **File > Scripts > RimStudio**.
+
+The installer finds a Python 3.9+ (and offers to install one if there is none),
+puts `numpy` and `Pillow` in a private environment of its own so it cannot
+disturb any Python you already use, and copies the menu entry into every
+Photoshop it finds. That last step is the only one that asks for admin, because
+Photoshop's `Presets\Scripts` lives in Program Files.
+
+Undo all of it with `install.ps1 -Uninstall`. Useful switches: `-NoMenu` (skip
+Photoshop and the admin prompt), `-NoVenv` (install into your own Python).
+
+<details>
+<summary>By hand, or on a machine where you cannot run the installer</summary>
+
+1. Put this folder anywhere — `Documents\Photoshop Scripts` is the usual home.
+2. `pip install numpy Pillow` into a Python 3.9+ that has `tkinter`
+   (python.org builds do; some rebuilds and most conda ones do not).
+3. In Photoshop: `File > Scripts > Browse...` and pick `RimStudio Panel.jsx`.
+   For a permanent menu entry, copy `RimStudio.jsx` into
    `C:\Program Files\Adobe\Adobe Photoshop <version>\Presets\Scripts\`
-   (needs an elevated copy, then restart Photoshop). It is a stub that runs
-   `RimStudio Panel.jsx` from your Documents folder, so editing the tool never
+   (elevated copy, then restart Photoshop). It is a stub that runs
+   `RimStudio Panel.jsx` from wherever the tool lives, so editing the tool never
    needs another elevated copy.
 
-Otherwise: `File > Scripts > Browse...` and pick `RimStudio Panel.jsx`.
+</details>
+
+<details>
+<summary>If it does not start</summary>
+
+- **Nothing happens when you pick it from the menu.** The panel is launched by
+  `pythonw.exe`, which has no console to print to. Missing packages now raise a
+  message box saying which one — if you get no box at all, run
+  `install.ps1` again and read what it says.
+- **"Could not find Python".** Run the installer; it records the interpreter it
+  built in `%APPDATA%\RimStudio\config.txt`, and the menu entry reads that file.
+- **The menu entry is missing after installing.** Photoshop only reads
+  `Presets\Scripts` at startup — restart it.
+- **A pull takes tens of seconds.** Suspect the document, not the tool: a
+  healthy pull on a 2400px two-layer file is about 3.5 seconds.
+
+</details>
 
 ## Use
 
@@ -83,3 +123,4 @@ opts in to the local network.
 | `rimstudio_gui.py` | the native window |
 | `rimstudio_ui.py` | Canvas-drawn widgets |
 | `make_icon.py` | renders the icon by running the engine on a synthetic scene |
+| `install.ps1` | the installer: Python, dependencies, Photoshop menu entry |

@@ -19,10 +19,37 @@ import sys
 import threading
 import traceback
 
-import numpy as np
-from PIL import Image, ImageTk
-import tkinter as tk
-from tkinter import filedialog
+
+def _cannot_start(missing, detail):
+    """Photoshop launches this with pythonw.exe, which has no console. An
+    ImportError there prints to nowhere and the window simply never appears -
+    the tool reads as broken with no clue why. Say it in a message box, which
+    ctypes can raise without any of the packages that might be missing."""
+    msg = ("RimStudio cannot start: %s is missing.\n\n"
+           "Fix it by running install.ps1 in the RimStudio folder, or by hand:\n\n"
+           "    \"%s\" -m pip install numpy Pillow\n\n"
+           "If tkinter is the missing one, reinstall Python from python.org and\n"
+           "keep the \"tcl/tk and IDLE\" option ticked.\n\n%s"
+           % (missing, sys.executable, detail))
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(0, msg, "RimStudio", 0x10)
+    except Exception:
+        sys.stderr.write(msg + "\n")
+    raise SystemExit(1)
+
+
+try:
+    import numpy as np
+    from PIL import Image, ImageTk
+except ImportError as _e:                      # numpy or Pillow not installed
+    _cannot_start(str(_e).split("'")[1] if "'" in str(_e) else "a dependency", _e)
+
+try:
+    import tkinter as tk
+    from tkinter import filedialog
+except ImportError as _e:                      # a Python built without tcl/tk
+    _cannot_start("tkinter", _e)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rim_engine

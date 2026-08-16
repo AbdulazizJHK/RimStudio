@@ -1,4 +1,6 @@
 __pycache__/
+.venv/
+venv/
 *.pyc
 *.png.bak
 RimStudio presets.json

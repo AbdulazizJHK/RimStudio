@@ -1,0 +1,5 @@
+# RimStudio needs very little: array maths and image IO.
+# tkinter draws the window, but it is part of Python itself - if it is missing,
+# reinstall Python from python.org with the "tcl/tk and IDLE" option ticked.
+numpy>=1.22
+Pillow>=9.0
