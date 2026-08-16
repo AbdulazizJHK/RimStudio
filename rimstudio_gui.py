@@ -54,6 +54,7 @@ LIGHT = [("glow", "Glow", 0, 2.5, 1.0, .05),
          ("rim", "Rim strength", 0, 4, 1.35, .05),
          ("core", "Core strength", 0, 4, 1.9, .05),
          ("wrap", "Spill", 0, 3, .55, .05),
+         ("keep_shadows", "Keep shadows", 0, 1, .5, .02),
          ("sat", "Light saturation", 0, 3, 1.45, .05),
          ("threshold", "Emit threshold", 0, .6, .1, .01)]
 SHADOW = [("shadow", "Shadow", 0, 1, 0, .01),

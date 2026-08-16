@@ -148,6 +148,7 @@ DEFAULTS = dict(seat=0.0, tint=0.0, reach=260.0, rim_reach=70.0,
                 m_sat=0.0, hi_protect=0.6, level_pct=70.0,
                 defringe=0.0, grain=0.0, focus=0.0,
                 glow=1.0, bg_glow=0.0, glow_thr=0.5, glow_colour=1.5,
+                keep_shadows=0.5,
                 shadow=0.0, sh_lean=0.0, sh_squash=0.28, sh_soft=26.0, sh_contact=0.6)
 
 
@@ -741,8 +742,30 @@ def relight(sub_rgba, bg_rgb, params=None, pre=None):
     # of the light as a side effect of changing its level.
     g = P["glow"]
 
+    # --- shadow protection on the SPILL.
+    # Spill is diffuse light landing on the subject, and a diffuse surface
+    # reflects light in proportion to how much it reflects at all - a black
+    # jacket lit by a lamp stays black. The code added it flat, so the darkest
+    # tones took the same absolute lift as the brightest and the deep end of the
+    # subject washed out. Measured on the Ghar Hira pair: spill alone lifted the
+    # darkest 1% of the subject from 0.0017 to 0.0440, a 25x lift, while rim
+    # contributed 42% and the frame bloom nothing - so this belongs on the
+    # spill, not on everything.
+    #
+    # Deliberately NOT applied to rim and core: those are grazing, largely
+    # specular, and a rim on dark clothing is exactly the shot people want.
+    spill_k = 1.0
+    if P["keep_shadows"] > 0 and inside.any():
+        bl = (base[..., 0] * 0.2126 + base[..., 1] * 0.7152 +
+              base[..., 2] * 0.0722)
+        # pivot on the subject's OWN mid level, so this behaves the same on a
+        # dark subject as on a bright one instead of tracking absolute exposure
+        piv = float(np.percentile(bl[inside], 60))
+        alb = np.clip(bl / max(piv, 1e-4), 0.0, 1.0)
+        spill_k = (1.0 - P["keep_shadows"] * (1.0 - alb))[..., None]
+
     out = base
-    out = out + wrapC * wrapI[..., None] * P["wrap"] * k * g
+    out = out + wrapC * wrapI[..., None] * P["wrap"] * k * g * spill_k
     out = out + rimC * (rimI * bSoft)[..., None] * P["rim"] * k * g
     out = out + rimC * (rimI * bCore)[..., None] * P["core"] * k * g
 

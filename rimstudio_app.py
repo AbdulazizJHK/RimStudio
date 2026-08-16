@@ -660,7 +660,7 @@ const L=[["glow","Glow",0,2.5,1,.05],["bg_glow","Bloom (whole frame)",0,1,0,.02]
          ["reach","Reach",20,500,260,5],["rim_reach","Rim reach",10,300,70,5],
          ["soft_w","Rim width",4,120,34,1],["core_w","Core width",1,60,9,1],
          ["rim","Rim strength",0,4,1.35,.05],["core","Core strength",0,4,1.9,.05],
-         ["wrap","Spill",0,3,.55,.05],["sat","Light saturation",0,3,1.45,.05],
+         ["wrap","Spill",0,3,.55,.05],["keep_shadows","Keep shadows",0,1,.5,.02],["sat","Light saturation",0,3,1.45,.05],
          ["threshold","Emit threshold",0,.6,.1,.01]];
 function mk(host,defs){defs.forEach(([k,n,a,b,d,st])=>{
   const r=document.createElement('div');r.className='row';
