@@ -291,6 +291,12 @@ if ($NoMenu) {
         foreach ($t in $targets) { Say "Found: $t" }
         $stub = Join-Path $tool 'RimStudio.jsx'
         if (-not (Test-Path $stub)) { Die "RimStudio.jsx is missing from $tool" }
+        # Check it is the menu stub, not some other file of the same name - an
+        # older release left a redirect script called RimStudio.jsx behind, and
+        # installing that gives a menu entry that opens an alert, not the tool.
+        if (-not (Select-String -LiteralPath $stub -SimpleMatch 'rimstudio-menu-stub' -Quiet)) {
+            Die "$stub is not the menu stub (it has no 'rimstudio-menu-stub' marker).`n  Replace it with the RimStudio.jsx from the repository and run this again."
+        }
 
         # Program Files needs admin, and only this one copy does - so the prompt
         # comes here, at the end, rather than gating the whole install.

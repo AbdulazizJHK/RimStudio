@@ -16,6 +16,10 @@
  *   3. the folder this stub is sitting in, for a plain copy-everything install
  */
 #target photoshop
+// rimstudio-menu-stub — the installer looks for this exact line before copying
+// this file into Program Files. A folder can hold more than one RimStudio.jsx
+// (an old redirect left behind by a previous version, say), and installing the
+// wrong one gives a menu entry that opens an alert instead of the tool.
 
 (function () {
     var PANEL = "RimStudio Panel.jsx";
