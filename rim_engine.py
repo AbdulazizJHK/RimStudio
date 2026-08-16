@@ -411,6 +411,78 @@ def _edge_step_L(pre, scale, want, lit):
     return abs(want - Lb_edge)
 
 
+def _light_and_ground(alpha, gate):
+    """Where the light is, where the subject stands, and whether there is any
+    ground in frame. Shared by the report and by auto_shadow()."""
+    H, W = alpha.shape[:2]
+    ys, xs = np.mgrid[0:H, 0:W]
+    gsum = float(gate.sum())
+    if gsum > 1e-3:
+        lx = float((gate * xs).sum() / gsum)
+        ly = float((gate * ys).sum() / gsum)
+    else:
+        lx, ly = W * 0.5, 0.0
+    sel = alpha > 0.5
+    if sel.any():
+        sx = float(xs[sel].mean())
+        s_bottom = float(np.where(alpha.max(axis=1) > 0.5)[0].max())
+    else:
+        sx, s_bottom = W * 0.5, H - 1.0
+    # No ground in frame means no shadow to cast: a subject cropped at the
+    # bottom edge would only get a sliver jammed against the frame.
+    return lx, ly, sx, s_bottom, s_bottom >= (H - 3)
+
+
+def auto_shadow(pre, preview_w):
+    """Recommended ground shadow, on its own.
+
+    Kept OUT of auto_params for the same reason as focus and glow, and more so:
+    a shadow is the one thing here that adds an object to the picture rather
+    than adjusting the one already in it. Whether the subject casts at all is a
+    judgement about the scene - what it is standing on, whether that ground is
+    even visible - so it should never appear or move because the grade was
+    re-run.
+
+    Returns (params, measured).
+    """
+    alpha = pre["alpha"]
+    scale = max(preview_w, 1) / 2400.0
+    lum = (pre["bg_lin"][..., 0] * 0.2126 + pre["bg_lin"][..., 1] * 0.7152 +
+           pre["bg_lin"][..., 2] * 0.0722)
+    out = (1.0 - alpha) > 0.5
+    top = float(np.percentile(lum[out], 99.5)) if out.any() else 0.5
+    thr = float(np.clip(top * 0.22, 0.02, 0.6))
+    gate = ((lum > thr) * (1.0 - alpha)).astype(np.float32)
+
+    H, W = alpha.shape[:2]
+    lx, ly, sx, s_bottom, touching = _light_and_ground(alpha, gate)
+
+    # Everything below is computed from SCALE-FREE fractions and expressed in
+    # full-resolution pixels, which is what the sliders take.
+    #
+    # ⚠ The old version measured in preview pixels, clipped to a range that
+    # suited a 780px preview, and only then divided by the scale - inflating
+    # both numbers by 3x on the way out. Auto handed back sh_lean -400 and
+    # sh_soft 120, which are the slider's MIN and MAX: a recommendation pinned
+    # to the ends of its own control is not a measurement.
+    inv = 1.0 / max(scale, 1e-6)
+    lean = float(np.clip(-(lx - sx) / max(W, 1) * 900.0, -400, 400))
+    # a high light throws a short shadow, a low one throws a long one
+    elev = float(np.clip((s_bottom - ly) / max(H, 1), 0.0, 1.0))
+    squash = float(np.clip(0.10 + 0.45 * (1.0 - elev), 0.06, 0.60))
+    dist = float(np.hypot(lx - sx, ly - s_bottom)) / max(W, 1)
+    soft = float(np.clip(14.0 + dist * 90.0, 8.0, 110.0))
+
+    return ({"shadow": 0.0 if touching else 0.45,
+             "sh_lean": round(lean),
+             "sh_squash": round(squash, 2),
+             "sh_soft": round(soft),
+             "sh_contact": 0.7},
+            {"light_at": [round(lx * inv), round(ly * inv)],
+             "ground": "no - the subject reaches the frame bottom"
+                       if touching else "yes"})
+
+
 def auto_glow(pre, preview_w):
     """Recommended Bloom amount, on its own.
 
@@ -556,34 +628,9 @@ def auto_params(pre, preview_w):
     # glow is deliberately NOT part of the main auto either - see auto_glow()
     dL = _edge_step_L(pre, scale, want, lit)
 
-    # --- ground shadow, aimed by where the light actually is
-    H, W = alpha.shape[:2]
-    ys, xs = np.mgrid[0:H, 0:W]
-    gsum = float(gate.sum())
-    if gsum > 1e-3:
-        lx = float((gate * xs).sum() / gsum)
-        ly = float((gate * ys).sum() / gsum)
-    else:
-        lx, ly = W * 0.5, 0.0
-    sel = alpha > 0.5
-    if sel.any():
-        sx = float(xs[sel].mean())
-        s_bottom = float(np.where(alpha.max(axis=1) > 0.5)[0].max())
-    else:
-        sx, s_bottom = W * 0.5, H - 1.0
-
-    # shadow falls AWAY from the light, in full-resolution pixels
-    lean = -(lx - sx) / max(W, 1) * 900.0
-    lean = float(np.clip(lean, -400, 400))
-    # a high light throws a short shadow, a low one throws a long one
-    elev = float(np.clip((s_bottom - ly) / max(H, 1), 0.0, 1.0))
-    squash = float(np.clip(0.10 + 0.45 * (1.0 - elev), 0.06, 0.60))
-    dist = float(np.hypot(lx - sx, ly - s_bottom)) / max(W, 1)
-    soft = float(np.clip(14.0 + dist * 90.0, 8.0, 110.0))
-    # No ground in frame means no shadow to cast. A subject cropped at the
-    # bottom edge would only get a sliver jammed against the frame.
-    touching = s_bottom >= (H - 3)
-    shadow = 0.0 if touching else 0.45
+    # the shadow is deliberately NOT part of the main auto - see auto_shadow().
+    # Only the light position is kept, for the report.
+    lx, ly, _sx, _sb, touching = _light_and_ground(alpha, gate)
 
     return {"m_exposure": round(expo, 2), "m_contrast": round(contrast, 2),
             "m_colour": round(colour, 2), "m_blacks": 0.8, "m_sat": 0.35,
@@ -593,11 +640,6 @@ def auto_params(pre, preview_w):
             "soft_w": soft_w, "core_w": core_w,
             "rim": round(rim_str, 2), "core": round(core_str, 2),
             "wrap": round(wrap_str, 2),
-            "shadow": shadow, "sh_lean": round(lean / max(scale, 1e-6)
-                                               if scale else lean),
-            "sh_squash": round(squash, 2), "sh_soft": round(soft / max(scale, 1e-6)
-                                                            if scale else soft),
-            "sh_contact": 0.7,
             "_measured": {"subject_L": round(mLs, 1), "plate_lit_L": round(lit, 1),
                           "aim_L": round(want, 1),
                           "contrast": [round(sLs, 1), round(sLb, 1)],

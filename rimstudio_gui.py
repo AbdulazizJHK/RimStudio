@@ -644,6 +644,11 @@ class App:
         sec3 = Section(self.col, "Ground shadow", False)
         sec3.pack(fill="x", pady=(8, 0), **pad)
         self._add(sec3.body, SHADOW)
+        srow = tk.Frame(sec3.body, bg=PANEL)
+        srow.pack(fill="x", pady=(0, 4))
+        Button(srow, "Auto shadow", self.auto_shadow, width=104, height=26,
+               tip="Set the shadow only - the main Auto leaves it alone").pack(
+            side="right")
 
         out = Section(self.col, "Output", True)
         out.pack(fill="x", pady=(8, 0), **pad)
@@ -1110,6 +1115,24 @@ class App:
             except Exception:
                 self.results.put(("err", traceback.format_exc(limit=3)))
         self._bg(work)
+
+    def auto_shadow(self):
+        if core.STATE["pre_prev"] is None:
+            self.msg.show("pull or open images first", "warn")
+            return
+        vals, m = rim_engine.auto_shadow(core.STATE["pre_prev"],
+                                         core.STATE["sub_prev"].shape[1])
+        for k, v in vals.items():
+            if k in self.sliders:
+                self.sliders[k].set(v)
+        self._hist_push()
+        if vals["shadow"] <= 0:
+            self.msg.show("no shadow: %s" % m["ground"], "warn")
+        else:
+            self.msg.show("shadow %.2f   (light at %d,%d - it falls the other way)"
+                          % (vals["shadow"], m["light_at"][0], m["light_at"][1]),
+                          "ok")
+        self.render(fast=False)
 
     def auto_glow(self):
         if core.STATE["pre_prev"] is None:
