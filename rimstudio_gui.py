@@ -92,6 +92,15 @@ class App:
 
         self._build()
         self._grips(root)          # place() last, so the grips sit on top
+        # Re-assert the sidebar width once the layout has actually settled.
+        # Bindings alone are not enough: main() builds the whole UI before the
+        # window has ever been laid out, so the canvas reports width 1 while the
+        # sidebar is filled and the pin lands on nothing. Same shape of bug as
+        # the taskbar style - a value applied before the thing it applies to
+        # exists - and the same remedy.
+        root.after_idle(self._pin_sidebar)
+        for _ms in (120, 350, 800):
+            root.after(_ms, self._pin_sidebar)
         self._hist_init()
         self.root.after(50, self._drain)
         self.root.bind("<Configure>", self._maybe_refit)
@@ -358,6 +367,19 @@ class App:
         self.root.geometry("%dx%d+%d+%d" % (w, h, max(0, (sw - w) // 2),
                                             max(0, (sh - h) // 3)))
 
+    def _pin_sidebar(self):
+        """Hold the scrolling column to the width of its viewport.
+
+        Cheap and idempotent: once the widths agree this does nothing, so the
+        <Configure> that it triggers does not loop.
+        """
+        try:
+            cw = self._sidecanvas.winfo_width()
+            if cw > 1 and self.col.winfo_width() != cw:
+                self._sidecanvas.itemconfig(self._colwin, width=cw)
+        except Exception:
+            pass
+
     def _prog_start(self, label):
         """Start the bar AND make sure it is on screen. The sidebar scrolls, so
         a bar that is merely packed can still be somewhere the user cannot see
@@ -456,10 +478,21 @@ class App:
                             width=10, troughcolor=PANEL, bg=CARD,
                             activebackground=ACC, relief="flat", bd=0)
         self.col = tk.Frame(canvas, bg=PANEL)
-        win = canvas.create_window((0, 0), window=self.col, anchor="nw")
+        win = self._colwin = canvas.create_window((0, 0), window=self.col, anchor="nw")
         self.col.bind("<Configure>",
                       lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win, width=e.width))
+        # add="+" - a bare bind() REPLACES, and quietly losing the scrollregion
+        # update above would leave the sidebar unable to scroll
+        canvas.bind("<Configure>", lambda e: self._pin_sidebar())
+        # ...and again whenever the COLUMN changes size, which the canvas's own
+        # <Configure> cannot catch. The canvas is sized once, before any of the
+        # sidebar's children exist; Tk applies the item width to the empty frame
+        # and then re-lays it at its own requested width the moment children
+        # arrive, silently dropping the pin. The result was a 717px column
+        # inside a 344px viewport with every button and slider running off the
+        # edge. Collapsing or expanding a section changes the requested width
+        # again, so this has to keep watching, not fire once.
+        self.col.bind("<Configure>", lambda e: self._pin_sidebar(), add="+")
         canvas.configure(yscrollcommand=vbar.set)
         canvas.pack(side="left", fill="both", expand=True)
         vbar.pack(side="right", fill="y")
@@ -1181,9 +1214,40 @@ class App:
                 pass
 
 
+def _dump_layout(app, path):
+    """Write the real widget geometry to a file. Set RIMSTUDIO_DEBUG=1 to get it.
+
+    The panel can only be looked at where it runs, and it lays out differently
+    depending on how it was STARTED - so a bug that only appears when Photoshop
+    launches it cannot be diagnosed by reading the code.
+    """
+    try:
+        w = []
+        w.append("window      %s" % app.root.geometry())
+        w.append("side frame  %d" % app._sidecanvas.master.winfo_width())
+        w.append("scrollcanvas%d" % app._sidecanvas.winfo_width())
+        w.append("inner col   %d" % app.col.winfo_width())
+        w.append("col reqwidth %d" % app.col.winfo_reqwidth())
+        w.append("item width  %s" % app._sidecanvas.itemcget(app._colwin, "width"))
+        w.append("b_pull      %d" % app.b_pull.winfo_width())
+        w.append("b_pull self.w %d" % app.b_pull.w)
+        s = app.sliders.get("m_exposure")
+        if s is not None:
+            w.append("slider      %d  self.w %d" % (s.winfo_width(), s.w))
+        open(path, "w").write("\n".join(w))
+    except Exception as e:
+        try:
+            open(path, "w").write("dump failed: %r" % (e,))
+        except Exception:
+            pass
+
+
 def main():
     root = tk.Tk()
     app = App(root)
+    if os.environ.get("RIMSTUDIO_DEBUG"):
+        root.after(3000, lambda: _dump_layout(
+            app, os.path.join(os.environ.get("TEMP", "."), "rimstudio_layout.txt")))
     if len(sys.argv) >= 3:
         try:
             j = core.load_pair(sys.argv[1], sys.argv[2])
