@@ -469,14 +469,33 @@ function dump(keepSubject, path, flatten) {
 if (!app.documents.length) { "NO DOC" } else {
   var prof = "";
   try { prof = doc.colorProfileName || ""; } catch (eProf) { prof = ""; }
-  dump(true,  "%s", false);
-  dump(false, "%s", true);
-  "OK|" + subjName + "|" + prof;
+  // Is there anything BEHIND the subject to use as a plate? If the active
+  // layer is the only one, the plate pass tries to delete the document's last
+  // layer, which Photoshop refuses; it then hides it and flattens to white.
+  // That produced a blank plate after 86 SECONDS of grinding, with no hint
+  // that the document was the problem. Check first and say so in a moment.
+  var plate = 0;
+  for (var pi = 0; pi < doc.artLayers.length; pi++) {
+      var pn = doc.artLayers[pi].name;
+      if (pn !== subjName && !isGen(pn) && doc.artLayers[pi].visible) plate++;
+  }
+  plate += doc.layerSets.length;
+  if (plate === 0) { "NO PLATE|" + subjName } else {
+    dump(true,  "%s", false);
+    dump(false, "%s", true);
+    "OK|" + subjName + "|" + prof;
+  }
 }
 """ % (",".join('"%s"' % g for g in generated), sub, bg)
     out = run_jsx(script)
     if "NO DOC" in out:
         return {"error": "Photoshop has no document open."}
+    if out.startswith("NO PLATE"):
+        who = out.split("|", 1)[1].strip() if "|" in out else "the active layer"
+        return {"error": 'Nothing behind "%s" to use as a background.\n'
+                         "This tool composites a cut-out ONTO a plate, so the\n"
+                         "document needs at least one other visible layer."
+                         % who}
     if not out.startswith("OK|"):
         return {"error": "Photoshop said: " + (out or "(nothing - is it busy?)")}
     parts = out.split("|")

@@ -101,6 +101,10 @@ class App:
         root.after_idle(self._pin_sidebar)
         for _ms in (120, 350, 800):
             root.after(_ms, self._pin_sidebar)
+        # After the withdraw/deiconify that the taskbar fix performs, or the
+        # window comes back up behind whatever was in front.
+        for _ms in (250, 700, 1200):
+            root.after(_ms, lambda: self._raise(root))
         self._hist_init()
         self.root.after(50, self._drain)
         self.root.bind("<Configure>", self._maybe_refit)
@@ -141,6 +145,68 @@ class App:
                 return h
             h = p
         return h
+
+    def _raise(self, root):
+        """Bring the panel to the front when it opens.
+
+        Photoshop launches this, so Photoshop owns the foreground - and Windows
+        refuses to let an arbitrary process steal it, which is why the panel
+        opened behind. `lift()` and `focus_force()` are not enough on their own;
+        they raise the window within Tk's idea of the stack while the shell
+        keeps Photoshop in front.
+
+        The way through is to attach this thread's input queue to the current
+        foreground thread for the moment of the call. Windows then treats the
+        two as one input context and allows the change. Detached again straight
+        after, so nothing is left hooked to Photoshop.
+
+        A brief topmost flash backs it up, immediately released - a panel that
+        stayed topmost would sit over Photoshop for the whole session, which is
+        worse than opening behind it.
+        """
+        try:
+            root.deiconify()
+            root.lift()
+            root.attributes("-topmost", True)
+            root.after(120, lambda: root.attributes("-topmost", False))
+        except Exception:
+            pass
+        try:
+            import ctypes
+            from ctypes import wintypes
+            u = ctypes.windll.user32
+            k = ctypes.windll.kernel32
+            for fn, args, res in (
+                    ("GetForegroundWindow", [], wintypes.HWND),
+                    ("SetForegroundWindow", [wintypes.HWND], wintypes.BOOL),
+                    ("BringWindowToTop", [wintypes.HWND], wintypes.BOOL),
+                    ("SetActiveWindow", [wintypes.HWND], wintypes.HWND)):
+                f = getattr(u, fn)
+                f.argtypes, f.restype = args, res
+            u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
+            u.GetWindowThreadProcessId.restype = wintypes.DWORD
+            u.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD,
+                                            wintypes.BOOL]
+
+            hwnd = self._hwnd(root)
+            fg = u.GetForegroundWindow()
+            me = k.GetCurrentThreadId()
+            other = u.GetWindowThreadProcessId(fg, None) if fg else 0
+            attached = bool(other and other != me
+                            and u.AttachThreadInput(other, me, True))
+            try:
+                u.BringWindowToTop(hwnd)
+                u.SetForegroundWindow(hwnd)
+                u.SetActiveWindow(hwnd)
+            finally:
+                if attached:
+                    u.AttachThreadInput(other, me, False)
+        except Exception:
+            pass
+        try:
+            root.focus_force()
+        except Exception:
+            pass
 
     def _round_corners(self, root, radius=10):
         """Rounded corners on the borderless window.
