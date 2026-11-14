@@ -27,6 +27,12 @@ usually missing: light thrown *from* the subject back onto the plate. Without it
 bright subject on a dark plate keeps a razor edge with no shared light across it,
 which is most of what reads as "pasted on".
 
+**A fixable edge.** Select Subject tends to leave a pixel or two of the old
+background, or an edge harder than the lens drew. Shrink edge chokes the matte
+(or spreads it, filling the new pixels with the subject's own colour), Soften
+edge feathers it, and both happen before the light is gathered, so the rim
+follows the corrected edge rather than the bad one.
+
 **Focus, grain, defringe, contact shadow.** Each measured rather than guessed — the
 focus match solves for the blur radius at which the subject's detail level equals the
 plate's, instead of multiplying by a constant.
@@ -47,7 +53,9 @@ Already downloaded the ZIP? Unzip it and **double-click `Install RimStudio.bat`*
 
 Then restart Photoshop. The tool is at **File > Scripts > RimStudio**.
 
-The installer finds a Python 3.9+ (and offers to install one if there is none),
+The installer finds a Python 3.9+ (and installs one if there is none - downloaded
+straight from python.org, checksum-verified, resuming if a slow connection
+drops, with winget as the fallback),
 puts `numpy` and `Pillow` in a private environment of its own so it cannot
 disturb any Python you already use, and copies the menu entry into every
 Photoshop it finds. That last step is the only one that asks for admin, because
@@ -107,6 +115,11 @@ save.
 
 The panel reopens with the sliders you last used.
 
+Something looks off and you cannot tell what? The buttons under the picture
+show one ingredient at a time: **Matte** (the cut-out mask - what Shrink and
+Soften edge change), **Light** (only what the background adds) and **Shadow**
+(the plate with the ground shadow, subject hidden).
+
 | | |
 |---|---|
 | Hold `\` (or the compare button) | before / after |
@@ -132,6 +145,16 @@ python rimstudio_app.py subject.png background.png     # localhost web UI
 The subject needs real transparency. The server binds to localhost only; `--lan`
 opts in to the local network.
 
+## Tests
+
+```
+python -m unittest discover -s tests
+```
+
+They run on every push and pull request (GitHub Actions, Windows, Python 3.9
+and 3.12), along with a real install and uninstall. The Photoshop round trip
+needs Photoshop, so that part is still checked by hand.
+
 ## Files
 
 | | |
@@ -143,3 +166,4 @@ opts in to the local network.
 | `rimstudio_ui.py` | Canvas-drawn widgets |
 | `make_icon.py` | renders the icon by running the engine on a synthetic scene |
 | `install.ps1` | the installer: Python, dependencies, Photoshop menu entry |
+| `tests/` | engine, core and panel tests |

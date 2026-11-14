@@ -1,0 +1,56 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    # Windows, because that is the only platform the tool ships for, and the
+    # panel's window code is exercised for real (Tk works on hosted runners).
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.12"]      # oldest the installer accepts, and current
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+
+  installer:
+    # The real installer, end to end, minus the Photoshop step (no Photoshop
+    # here, and it is the only part that needs admin). Then uninstall, and
+    # check it left nothing behind.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -NoMenu
+          if ($LASTEXITCODE -ne 0) { throw "installer exited $LASTEXITCODE" }
+      - name: Check what it installed
+        shell: powershell
+        run: |
+          $cfg = Join-Path $env:APPDATA 'RimStudio\config.txt'
+          if (-not (Test-Path $cfg)) { throw "no $cfg" }
+          Get-Content $cfg
+          $venv = Join-Path $env:LOCALAPPDATA 'RimStudio\venv\Scripts\python.exe'
+          & $venv -c "import sys; sys.path.insert(0, '.'); import rimstudio_gui; print('panel imports OK')"
+          if ($LASTEXITCODE -ne 0) { throw 'the installed environment cannot load the panel' }
+      - name: Uninstall
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall -NoMenu
+          if ($LASTEXITCODE -ne 0) { throw "uninstall exited $LASTEXITCODE" }
+          foreach ($p in "$env:APPDATA\RimStudio", "$env:LOCALAPPDATA\RimStudio") {
+            if (Test-Path $p) { throw "uninstall left $p behind" }
+          }

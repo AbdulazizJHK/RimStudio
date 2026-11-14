@@ -148,8 +148,46 @@ DEFAULTS = dict(seat=0.0, tint=0.0, reach=260.0, rim_reach=70.0,
                 m_sat=0.0, hi_protect=0.6, level_pct=70.0,
                 defringe=0.0, grain=0.0, focus=0.0,
                 glow=1.0, bg_glow=0.0, glow_thr=0.5, glow_colour=1.5,
-                keep_shadows=0.5,
+                keep_shadows=0.5, edge_shrink=0.0, edge_soft=0.0,
                 shadow=0.0, sh_lean=0.0, sh_squash=0.28, sh_soft=26.0, sh_contact=0.6)
+
+
+def _morph(a, op):
+    """One pixel of grey-level erosion (op=np.minimum) or dilation (np.maximum)
+    over the 4-neighbourhood. No scipy: four shifted views of an edge-padded
+    copy are enough at the 1-3 pixel radii a matte ever needs."""
+    p = np.pad(a, 1, mode="edge")
+    out = op(a, p[:-2, 1:-1])
+    out = op(out, p[2:, 1:-1])
+    out = op(out, p[1:-1, :-2])
+    return op(out, p[1:-1, 2:])
+
+
+def refine_alpha(alpha, shrink=0.0, soft=0.0, scale=1.0):
+    """Choke (shrink > 0) or spread (shrink < 0) the matte, then feather it.
+
+    Select Subject usually leaves either a pixel or two of the old background
+    around the cut-out or an edge harder than the lens would have drawn it, and
+    the rim light then brightens exactly that line. Defringe fixes the colour of
+    the edge; this fixes where the edge is. Both values are in full-resolution
+    pixels (2400px-wide reference) and scale with the tier like every radius.
+    """
+    a = np.asarray(alpha, dtype=np.float32)
+    r = abs(float(shrink)) * scale
+    if r > 1e-3:
+        op = np.minimum if shrink > 0 else np.maximum
+        n = int(r)
+        for _ in range(n):
+            a = _morph(a, op)
+        f = r - n
+        if f > 1e-3:                    # fractional radius: blend one more step
+            a = a * (1.0 - f) + _morph(a, op) * f
+    s = float(soft) * scale
+    if s > 1e-3:
+        rr = max(1, int(round(s)))
+        t = min(1.0, s / rr)            # under a pixel: blend toward a 1px blur
+        a = a * (1.0 - t) + blur(a, rr) * t
+    return np.clip(a, 0.0, 1.0).astype(np.float32)
 
 
 def defringe(obj_lin, alpha, amount, radius=3.0):
@@ -169,6 +207,17 @@ def defringe(obj_lin, alpha, amount, radius=3.0):
     pulled = num / den
     # only where the matte is soft, and only as far as the user asks
     k = (np.clip(1.0 - (alpha - 0.35) / 0.6, 0.0, 1.0) * amount)[..., None]
+    return obj_lin * (1.0 - k) + pulled * k
+
+
+def _fill_revealed(obj_lin, alpha, radius):
+    """Give pixels the original matte had fully transparent the colour of the
+    subject just inside them. Unlike defringe, semi-transparent pixels (hair,
+    motion blur) keep their real colour - only the empty ones are filled."""
+    inner = np.clip((alpha - 0.90) / 0.10, 0.0, 1.0).astype(np.float32)
+    pulled = (blur(obj_lin * inner[..., None], radius) /
+              np.maximum(blur(inner, radius), 1e-4)[..., None])
+    k = np.clip(1.0 - alpha * 20.0, 0.0, 1.0)[..., None]
     return obj_lin * (1.0 - k) + pulled * k
 
 
@@ -664,9 +713,13 @@ def prepare(sub_rgba, bg_rgb):
             "bg_lab": None}
 
 
-def relight(sub_rgba, bg_rgb, params=None, pre=None):
+def relight(sub_rgba, bg_rgb, params=None, pre=None, parts=None):
     """sub_rgba: HxWx4 float 0-1 (sRGB + alpha). bg_rgb: HxWx3 float 0-1 sRGB.
-    Returns HxWx4 float 0-1 sRGB with the original alpha."""
+    Returns HxWx4 float 0-1 sRGB with the (refined) alpha.
+
+    Pass a dict as `parts` to get the pieces the diagnostic views show: the
+    final matte ("alpha") and the light the background added ("light", linear,
+    before focus and grain)."""
     P = dict(DEFAULTS)
     if params:
         for k, v in params.items():
@@ -687,6 +740,18 @@ def relight(sub_rgba, bg_rgb, params=None, pre=None):
     # scale radii with the image so a preview matches the full-size render
     scale = max(sub_rgba.shape[1], 1) / 2400.0
     R = lambda v: max(1.0, v * scale)
+
+    # Fix the matte FIRST, so the rim gathers along the edge you end up with
+    # rather than the one Select Subject drew.
+    if P["edge_shrink"] or P["edge_soft"]:
+        orig = alpha
+        alpha = refine_alpha(alpha, P["edge_shrink"], P["edge_soft"], scale)
+        # Spreading or feathering reveals pixels that were fully transparent,
+        # and their colour is whatever the cut-out tool left there - usually
+        # black. Fill them with colour pulled from inside the subject instead.
+        if P["edge_shrink"] < 0 or P["edge_soft"] > 0:
+            obj_lin = _fill_revealed(obj_lin, orig, R(3.0 + max(0.0, -P["edge_shrink"])
+                                                      + P["edge_soft"]))
 
     inside = alpha > 0.5
     wrapC, wrapI = gathered(bg_lin, alpha, R(P["reach"]), P["threshold"], P["knee"])
@@ -768,6 +833,8 @@ def relight(sub_rgba, bg_rgb, params=None, pre=None):
     out = out + wrapC * wrapI[..., None] * P["wrap"] * k * g * spill_k
     out = out + rimC * (rimI * bSoft)[..., None] * P["rim"] * k * g
     out = out + rimC * (rimI * bCore)[..., None] * P["core"] * k * g
+    if parts is not None:
+        parts["light"] = out - base
 
     # apply the focus match after the light is added, so the rim softens with
     # everything else - a sharp rim on a soft subject is its own kind of tell
@@ -782,6 +849,8 @@ def relight(sub_rgba, bg_rgb, params=None, pre=None):
         need = grain_deficit(bg_rgb, rgb, alpha)
         if need > 0:
             rgb = np.clip(add_grain(rgb, alpha, need, P["grain"]), 0.0, 1.0)
+    if parts is not None:
+        parts["alpha"] = np.clip(alpha, 0.0, 1.0)
     return np.dstack([rgb, np.clip(alpha, 0.0, 1.0)]).astype(np.float32)
 
 
@@ -1009,7 +1078,8 @@ def shadow_for(sub_rgba, params=None):
     if P["shadow"] <= 0:
         return None
     scale = max(sub_rgba.shape[1], 1) / 2400.0
-    return contact_shadow(sub_rgba[..., 3].astype(np.float32), P["shadow"],
+    alpha = refine_alpha(sub_rgba[..., 3], P["edge_shrink"], P["edge_soft"], scale)
+    return contact_shadow(alpha, P["shadow"],
                           P["sh_lean"], P["sh_squash"], P["sh_soft"],
                           P["sh_contact"], scale)
 
