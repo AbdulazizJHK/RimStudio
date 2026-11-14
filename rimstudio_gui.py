@@ -67,9 +67,14 @@ MATCH = [("m_exposure", "Exposure", 0, 1, .85, .01),
          ("m_blacks", "Black point", 0, 1, .7, .01),
          ("m_sat", "Saturation", 0, 1, .3, .01),
          ("hi_protect", "Protect highlights", 0, 1, .6, .01),
-         ("defringe", "Defringe edge", 0, 1, .7, .01),
          ("grain", "Match grain", 0, 1, .8, .01),
          ("focus", "Match focus", 0, 1, 0, .01)]
+# Where the cut-out's edge is, and what colour it is. Shrink and Soften are in
+# pixels at a 2400px-wide frame (scaled with the image, like every radius);
+# a negative Shrink spreads the edge instead.
+EDGE = [("edge_shrink", "Shrink edge", -3, 3, 0, .1),
+        ("edge_soft", "Soften edge", 0, 6, 0, .1),
+        ("defringe", "Defringe edge", 0, 1, .7, .01)]
 # The light controls used to be one 14-slider column. Split by what you are
 # deciding: how much glow, how strong the rim, and - folded away, because it is
 # rarely touched once a plate is set up - the shape of the rim.
@@ -117,6 +122,7 @@ class App:
         self.photo = None
         self.comparing = False
         self.split = None            # None = off, else 0..1 divider position
+        self.view_mode = "result"    # see core.VIEWS
         self._dragging_split = False
         self._plain_arr = None
         self._img_rect = None
@@ -562,6 +568,19 @@ class App:
         self.b_split = Button(zbox, "", self.toggle_split, width=34, height=26,
                               icon="split", tip="Split view - drag the divider")
         self.b_split.pack(side="left", padx=(4, 0))
+        # Diagnostic views: one ingredient of the frame on its own, so a bad
+        # edge can be told apart from bad light at a glance.
+        self.view_btns = {}
+        for i, (mode, text, tip) in enumerate((
+                ("result", "Result", "The finished frame"),
+                ("matte", "Matte", "The cut-out mask - white is subject. Shows what Shrink and Soften do"),
+                ("light", "Light", "Only the light the background adds"),
+                ("shadow", "Shadow", "The plate with the ground shadow, subject hidden"))):
+            b = Button(zbox, text, lambda m=mode: self.set_view(m), width=54,
+                       height=26, tip=tip)
+            b.pack(side="left", padx=((12 if i == 0 else 1), 0))
+            self.view_btns[mode] = b
+        self.view_btns["result"].set_active(True)
         self.caption = tk.Label(bar, text="Nothing loaded", bg=BG, fg=FAINT,
                                 font=F_SMALL)
         self.caption.pack(side="right")
@@ -682,6 +701,14 @@ class App:
         Button(frow, "Auto focus", self.auto_focus, width=104,
                height=26, tip="Set Match focus only - the main Auto leaves it alone").pack(
             side="right")
+
+        sece = Section(self.col, "Cut-out edge", False)
+        sece.pack(fill="x", pady=(8, 0), **pad)
+        self._add(sece.body, EDGE)
+        note = tk.Label(sece.body, bg=PANEL, fg=FAINT, font=F_SMALL, anchor="w",
+                        justify="left", wraplength=SIDE_W - 60,
+                        text="Check it with the Matte view under the picture.")
+        note.pack(fill="x", pady=(0, 4))
 
         sec2 = Section(self.col, "Rim light", False)
         sec2.pack(fill="x", pady=(8, 0), **pad)
@@ -850,7 +877,8 @@ class App:
                 else:
                     k = "draft" if fast else "prev"
                     arr = core.composite(core.STATE["sub_" + k], core.STATE["bg_" + k],
-                                         p, pre=core.STATE["pre_" + k])
+                                         p, pre=core.STATE["pre_" + k],
+                                         view=self.view_mode)
                 self.results.put(("img", arr))
             except Exception:
                 self.results.put(("err", traceback.format_exc()))
@@ -982,7 +1010,7 @@ class App:
             return
         # Split is mixed in IMAGE space, before the crop, so the divider stays
         # on the same feature when you zoom rather than sliding across it.
-        if self.split is not None:
+        if self.split is not None and self.view_mode == "result":
             plain = self._plain()
             if plain is not None and plain.shape == arr.shape:
                 cut = int(round(self.split * arr.shape[1]))
@@ -1322,6 +1350,14 @@ class App:
         self._caption("ORIGINAL" if on else "")
         self.render(fast=False, plain=on)
 
+    def set_view(self, mode):
+        if mode not in core.VIEWS or mode == self.view_mode:
+            return
+        self.view_mode = mode
+        for m, b in self.view_btns.items():
+            b.set_active(m == mode)
+        self.render(fast=False)
+
     # ------------------------------------------------------------ split view
     def _plain(self):
         """The untouched paste-up, cached.
@@ -1354,7 +1390,7 @@ class App:
 
     def _split_x(self):
         """Screen x of the divider, or None when it is scrolled out of view."""
-        if self.split is None or not self._img_rect:
+        if self.split is None or not self._img_rect or self.view_mode != "result":
             return None
         left, top, w, h = self._img_rect
         r = self._view_rect()

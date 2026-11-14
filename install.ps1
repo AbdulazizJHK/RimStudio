@@ -95,7 +95,8 @@ function Get-PhotoshopScriptFolders {
 if ($Uninstall) {
     Step 'Removing RimStudio'
 
-    $folders = Get-PhotoshopScriptFolders
+    # -NoMenu means "leave Photoshop alone" here too: no admin prompt
+    $folders = if ($NoMenu) { @() } else { Get-PhotoshopScriptFolders }
     $stubs = @()
     foreach ($f in $folders) {
         $p = Join-Path $f 'RimStudio.jsx'
@@ -117,6 +118,11 @@ if ($Uninstall) {
         if (-not (Test-Path $d)) { continue }
         try   { Remove-Item $d -Recurse -Force -ErrorAction Stop; Good "Removed $d" }
         catch { Warn "Could not remove $d - close RimStudio if it is open, then run this again." }
+    }
+    # the venv's parent folder, once it is empty - nothing else of ours lives there
+    $venvParent = Split-Path $VENV_DIR
+    if ((Test-Path $venvParent) -and -not (Get-ChildItem $venvParent -Force)) {
+        Remove-Item $venvParent -Force -ErrorAction SilentlyContinue
     }
 
     Write-Host "`nDone. The tool folder itself was left alone - delete it if you want it gone.`n"
@@ -238,14 +244,69 @@ function Find-Python {
     $null
 }
 
+# Pinned, with the SHA256 python.org publishes (also in winget's manifest), so
+# a truncated or tampered download is refused rather than run.
+$PY_URL    = 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe'
+$PY_SHA256 = '67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb'
+
+function Install-PythonDirect {
+    # winget refreshes its whole catalogue before downloading and gives up on
+    # a slow line (InternetReadFile 0x80072ee2), which on a ~20 KB/s
+    # connection meant ten minutes of nothing followed by a failure. curl.exe
+    # ships with Windows 10 1803+ and can resume: each attempt carries on from
+    # where the last one dropped instead of starting the 27 MB again.
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (-not (Test-Path $curl)) { return $false }
+    $dir = Join-Path $env:TEMP ('rimstudio-python-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $exe = Join-Path $dir 'python-installer.exe'
+    try {
+        Say 'Downloading Python 3.12 from python.org (27 MB; resumes if the connection drops)...'
+        $ErrorActionPreference = 'Continue'
+        for ($i = 1; $i -le 30; $i++) {
+            & $curl -L --fail --progress-bar -C - --connect-timeout 30 `
+                --speed-limit 1000 --speed-time 60 -o "$exe" $PY_URL
+            if ($LASTEXITCODE -eq 0) { break }
+            Warn "  connection dropped (attempt $i of 30) - resuming..."
+            Start-Sleep -Seconds 3
+        }
+        $ErrorActionPreference = 'Stop'
+        if (-not (Test-Path $exe)) { return $false }
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLower()
+        if ($hash -ne $PY_SHA256) {
+            Warn "  The download does not match python.org's checksum - not running it."
+            return $false
+        }
+        Say 'Installing Python for this user (no admin needed)...'
+        $p = Start-Process -FilePath $exe -Wait -PassThru -ArgumentList @(
+            '/quiet', 'InstallAllUsers=0', 'PrependPath=1', 'Include_tcltk=1',
+            'Include_test=0', 'InstallLauncherAllUsers=0')
+        return ($p.ExitCode -eq 0)
+    } catch {
+        Warn "  $($_.Exception.Message)"
+        return $false
+    } finally {
+        $ErrorActionPreference = 'Stop'
+        Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Update-SessionPath {
+    $env:PATH = [Environment]::GetEnvironmentVariable('PATH','User') + ';' + [Environment]::GetEnvironmentVariable('PATH','Machine')
+}
+
 $py = Find-Python
 if (-not $py) {
     Warn 'No suitable Python found.'
+    if (Install-PythonDirect) {
+        Update-SessionPath
+        $py = Find-Python
+    }
     $wg = Get-Command winget -ErrorAction SilentlyContinue
-    if ($wg) {
-        Say 'Installing Python 3.12 with winget (this can take a couple of minutes)...'
+    if (-not $py -and $wg) {
+        Say 'Trying winget instead (this can take a few minutes)...'
         & winget install --id Python.Python.3.12 --scope user --accept-package-agreements --accept-source-agreements --silent
-        $env:PATH = [Environment]::GetEnvironmentVariable('PATH','User') + ';' + [Environment]::GetEnvironmentVariable('PATH','Machine')
+        Update-SessionPath
         $py = Find-Python
     }
     if (-not $py) {
@@ -260,6 +321,11 @@ Step '[3/5] Installing numpy and Pillow'
 
 $runtime = $py.Exe
 $runtimeW = Join-Path (Split-Path $py.Exe) 'pythonw.exe'
+
+# pip's defaults (15 s timeout, 5 retries) give up on a slow line partway
+# through numpy's 13 MB. Be patient unless the user has set their own.
+if (-not $env:PIP_DEFAULT_TIMEOUT) { $env:PIP_DEFAULT_TIMEOUT = '120' }
+if (-not $env:PIP_RETRIES)         { $env:PIP_RETRIES = '15' }
 
 if ($NoVenv) {
     Say 'Using your own Python (-NoVenv), installing into it with --user...'

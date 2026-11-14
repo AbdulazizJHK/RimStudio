@@ -139,16 +139,33 @@ def save_upload(data_url, name_hint):
     return path
 
 
-def composite(sub_rgba, bg_rgb, params, graded=True, pre=None):
+VIEWS = ("result", "matte", "light", "shadow")
+
+
+def composite(sub_rgba, bg_rgb, params, graded=True, pre=None, view="result"):
+    """The preview frame. `view` other than "result" shows one ingredient on
+    its own, so a bad edge can be told apart from bad light:
+      matte  - the final cut-out mask, white = subject
+      light  - only the light the background adds, on black
+      shadow - the plate with the ground shadow and no subject
+    """
+    parts = {} if (graded and view != "result") else None
     if graded:
-        lit = rim_engine.relight(sub_rgba, bg_rgb, params, pre=pre)
+        lit = rim_engine.relight(sub_rgba, bg_rgb, params, pre=pre, parts=parts)
     else:
         lit = sub_rgba
+    if view == "matte" and parts is not None:
+        return np.repeat(parts["alpha"][..., None], 3, axis=2)
+    if view == "light" and parts is not None:
+        light = parts["light"] * parts["alpha"][..., None]
+        return np.clip(rim_engine.lin_to_srgb(light), 0, 1)
     plate = bg_rgb
     if graded:
         sh = rim_engine.shadow_for(sub_rgba, params)
         if sh is not None:
             plate = plate * (1.0 - sh)[..., None]   # shadow goes UNDER the subject
+    if view == "shadow" and parts is not None:
+        return np.clip(plate, 0, 1)
     a = lit[..., 3:4]
     flat = np.clip(plate * (1 - a) + lit[..., :3] * a, 0, 1)
     if graded:
@@ -798,6 +815,7 @@ input[type=text]{width:100%;background:#111;border:1px solid var(--line);color:v
 const M=[["m_exposure","Exposure",0,1,.85,.01],["m_contrast","Contrast",0,1,.6,.01],
          ["m_colour","Colour balance",0,1,.6,.01],["m_blacks","Black point",0,1,.7,.01],
          ["m_sat","Saturation",0,1,.3,.01],["hi_protect","Protect highlights",0,1,.6,.01],
+         ["edge_shrink","Shrink edge",-3,3,0,.1],["edge_soft","Soften edge",0,6,0,.1],
          ["defringe","Defringe edge",0,1,.7,.01],["grain","Match grain",0,1,.8,.01],
          ["focus","Match focus",0,1,0,.01]];
 const S=[["shadow","Shadow",0,1,0,.01],["sh_lean","Lean",-400,400,0,5],
