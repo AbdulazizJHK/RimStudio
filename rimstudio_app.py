@@ -63,6 +63,7 @@ STATE = {
     "sub_draft": None,
     "bg_draft": None,
     "pre_draft": None,
+    "ps_subject": None, # name of the Photoshop layer the subject was pulled from
 }
 
 
@@ -84,6 +85,7 @@ def load_pair(sub_path, bg_path):
 
     pw = min(PREVIEW_W, W)
     ph = max(1, int(H * pw / W))
+    STATE["ps_subject"] = None        # set again by pull_from_photoshop
     STATE["sub_full"] = _to_float(sub, "RGBA")
     STATE["bg_full"] = _to_float(bg, "RGB")
     STATE["sub_prev"] = _to_float(sub.resize((pw, ph), Image.LANCZOS), "RGBA")
@@ -160,7 +162,6 @@ def composite(sub_rgba, bg_rgb, params, graded=True, pre=None):
     return flat
 
 
-SETTINGS_FILE = os.path.join(os.path.expanduser("~"), "RimStudio_settings.txt")
 PRESET_FILE = os.path.join(os.path.expanduser("~"), "RimStudio presets.json")
 
 # Starting points, not house style - each is a setting that was actually
@@ -172,19 +173,25 @@ BUILTIN_PRESETS = {
         "m_sat": 0.35, "hi_protect": 0.6, "defringe": 0.7, "grain": 0.8, "focus": 0.0,
         "reach": 80, "rim_reach": 22, "soft_w": 34, "core_w": 9, "rim": 1.35,
         "core": 1.9, "wrap": 0.55, "sat": 1.45, "threshold": 0.213,
-        "shadow": 0.0, "sh_lean": 0, "sh_squash": 0.28, "sh_soft": 26, "sh_contact": 0.6},
+        "shadow": 0.0, "sh_lean": 0, "sh_squash": 0.28, "sh_soft": 26, "sh_contact": 0.6,
+        "glow": 1.0, "bg_glow": 0.0, "glow_thr": 0.5, "glow_colour": 1.5,
+        "keep_shadows": 0.5},
     "Subtle integrate": {
         "m_exposure": 0.4, "m_contrast": 0.5, "m_colour": 0.5, "m_blacks": 0.6,
         "m_sat": 0.25, "hi_protect": 0.6, "defringe": 0.6, "grain": 0.8, "focus": 0.3,
         "reach": 200, "rim_reach": 60, "soft_w": 30, "core_w": 8, "rim": 0.8,
         "core": 1.0, "wrap": 0.4, "sat": 1.25, "threshold": 0.15,
-        "shadow": 0.0, "sh_lean": 0, "sh_squash": 0.28, "sh_soft": 26, "sh_contact": 0.6},
+        "shadow": 0.0, "sh_lean": 0, "sh_squash": 0.28, "sh_soft": 26, "sh_contact": 0.6,
+        "glow": 1.0, "bg_glow": 0.0, "glow_thr": 0.5, "glow_colour": 1.5,
+        "keep_shadows": 0.5},
     "Rim only (no grade)": {
         "m_exposure": 0.0, "m_contrast": 0.0, "m_colour": 0.0, "m_blacks": 0.0,
         "m_sat": 0.0, "hi_protect": 0.6, "defringe": 0.5, "grain": 0.0, "focus": 0.0,
         "reach": 260, "rim_reach": 70, "soft_w": 34, "core_w": 9, "rim": 1.35,
         "core": 1.9, "wrap": 0.55, "sat": 1.45, "threshold": 0.1,
-        "shadow": 0.0, "sh_lean": 0, "sh_squash": 0.28, "sh_soft": 26, "sh_contact": 0.6},
+        "shadow": 0.0, "sh_lean": 0, "sh_squash": 0.28, "sh_soft": 26, "sh_contact": 0.6,
+        "glow": 1.0, "bg_glow": 0.0, "glow_thr": 0.5, "glow_colour": 1.5,
+        "keep_shadows": 0.5},
 }
 
 
@@ -245,34 +252,87 @@ def delete_preset(name):
     return {"msg": 'deleted "%s"' % name}
 
 
-def save_settings(params):
-    """Write what the app is using so RimStudio.jsx can apply the same look.
-
-    Plain key=value rather than JSON because ExtendScript has no JSON parser in
-    older Photoshop builds and splitting on ';' always works.
-    """
+def _data_dir():
+    """%APPDATA%\\RimStudio - the folder install.ps1 -Uninstall removes, so
+    nothing written here outlives the tool."""
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    d = os.path.join(base, "RimStudio")
     try:
-        pairs = []
-        for k, v in sorted(params.items()):
-            if not str(k).startswith("_"):
-                pairs.append("%s=%s" % (k, v))
-        with open(SETTINGS_FILE, "w") as f:
-            f.write(";".join(pairs))
+        os.makedirs(d, exist_ok=True)
     except Exception:
         pass
+    return d
 
 
-def render_full(params):
-    save_settings(params)
-    """Full-resolution render. Returns the files written: the relit subject and,
-    if switched on, the ground shadow as its own layer (it belongs UNDER the
-    subject, so it cannot be baked into the same image)."""
+SESSION_FILE = os.path.join(_data_dir(), "last_session.json")
+LOG_FILE = os.path.join(_data_dir(), "rimstudio.log")
+
+
+def save_settings(params):
+    """Remember the sliders so the next launch opens where this one left off."""
+    try:
+        clean = dict((k, float(v)) for k, v in params.items()
+                     if not str(k).startswith("_"))
+        with open(SESSION_FILE, "w") as f:
+            json.dump(clean, f, indent=1, sort_keys=True)
+    except Exception:
+        pass          # remembering is a convenience; never fail a render over it
+
+
+def load_settings():
+    """The last session's sliders, or {} - a missing or corrupt file is not an
+    error, just a first run."""
+    try:
+        with open(SESSION_FILE, "r") as f:
+            d = json.load(f)
+        return dict((str(k), float(v)) for k, v in d.items()) if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def log_error(text):
+    """Append a full traceback to the log and return the log's path. The UI only
+    has room for one sentence; the rest belongs somewhere it can be read later."""
+    try:
+        import time
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write("\n--- %s\n%s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), text))
+    except Exception:
+        pass
+    return LOG_FILE
+
+
+def _free_name(path, unique):
+    """`path` itself, or with unique=True the first "name 2.png", "name 3.png"
+    that does not exist yet - so saving twice never overwrites the first."""
+    if not unique or not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    n = 2
+    while os.path.exists("%s %d%s" % (stem, n, ext)):
+        n += 1
+    return "%s %d%s" % (stem, n, ext)
+
+
+def _ensure_full():
     if STATE["pre_full"] is None:
         STATE["pre_full"] = rim_engine.prepare(STATE["sub_full"], STATE["bg_full"])
+
+
+def render_full(params, unique=False):
+    """Full-resolution render. Returns the files written: the relit subject and,
+    if switched on, the ground shadow as its own layer (it belongs UNDER the
+    subject, so it cannot be baked into the same image).
+
+    unique=True picks fresh file names instead of overwriting the last save."""
+    save_settings(params)
+    _ensure_full()
     lit = rim_engine.relight(STATE["sub_full"], STATE["bg_full"], params,
                              pre=STATE["pre_full"])
     stem = os.path.splitext(STATE["sub_path"])[0]
-    out = stem + " - relit.png"
+    out = _free_name(stem + " - relit.png", unique)
+    # every file of one save shares the suffix the relit layer got
+    tag = os.path.splitext(out)[0][len(stem + " - relit"):]
     Image.fromarray((lit * 255).astype(np.uint8), mode="RGBA").save(out)
     STATE["out_path"] = out
 
@@ -281,7 +341,7 @@ def render_full(params):
     if sh is not None:
         rgba = np.zeros(sh.shape + (4,), np.uint8)      # black, alpha = shadow
         rgba[..., 3] = (np.clip(sh, 0, 1) * 255).astype(np.uint8)
-        shadow_path = stem + " - shadow.png"
+        shadow_path = stem + " - shadow%s.png" % tag
         Image.fromarray(rgba, mode="RGBA").save(shadow_path)
 
     # The glow is measured off the FINISHED frame - subject already in place -
@@ -290,22 +350,43 @@ def render_full(params):
     # layer, which is also how it can be dialled back later without re-running
     # the tool.
     glow_path = None
-    flat, lit_a = _flatten(params)
+    flat, lit_a = _flatten(params, lit=lit, sh=sh)
     halo = rim_engine.halo_layer(flat, params, alpha=lit_a)
     if halo is not None:
-        glow_path = stem + " - glow.png"
+        glow_path = stem + " - glow%s.png" % tag
         Image.fromarray((halo * 255).astype(np.uint8), mode="RGB").save(glow_path)
     return {"relit": out, "shadow": shadow_path, "glow": glow_path}
 
 
-def _flatten(params):
+def render_composite(params):
+    """The finished picture as one flat PNG - plate, shadow, relit subject and
+    the Screen glow on top - for anyone not finishing in Photoshop. Never
+    overwrites an earlier save."""
+    save_settings(params)
+    _ensure_full()
+    flat, lit_a = _flatten(params)
+    halo = rim_engine.halo_layer(flat, params, alpha=lit_a)
+    if halo is not None:
+        flat = 1.0 - (1.0 - flat) * (1.0 - np.clip(halo, 0, 1))     # Screen
+    stem = os.path.splitext(STATE["sub_path"])[0]
+    out = _free_name(stem + " - composite.png", True)
+    Image.fromarray((np.clip(flat, 0, 1) * 255).astype(np.uint8), mode="RGB").save(out)
+    STATE["out_path"] = out
+    return out
+
+
+def _flatten(params, lit=None, sh=False):
     """The full-res composite as Photoshop will show it once the relit subject
     and shadow are placed - what the glow pass has to measure. Returns it with
-    the relit matte, which the outward spill needs to know which side is which."""
-    lit = rim_engine.relight(STATE["sub_full"], STATE["bg_full"], params,
-                             pre=STATE["pre_full"])
+    the relit matte, which the outward spill needs to know which side is which.
+    Pass `lit` / `sh` when the caller already has them: relighting at full
+    size is the slow part, and doing it twice doubled every send."""
+    if lit is None:
+        lit = rim_engine.relight(STATE["sub_full"], STATE["bg_full"], params,
+                                 pre=STATE["pre_full"])
     plate = STATE["bg_full"]
-    sh = rim_engine.shadow_for(STATE["sub_full"], params)
+    if sh is False:                       # False = not computed; None = no shadow
+        sh = rim_engine.shadow_for(STATE["sub_full"], params)
     if sh is not None:
         plate = plate * (1.0 - sh)[..., None]
     a = lit[..., 3:4]
@@ -505,10 +586,79 @@ if (!app.documents.length) { "NO DOC" } else {
         return {"error": "Photoshop reported success but the files are missing."}
     info = load_pair(sub, bg)
     info["msg"] = 'pulled "%s" as the subject' % name
+    STATE["ps_subject"] = name
     info["profile"] = profile
     if profile and "srgb" not in profile.lower():
         info["msg"] += "\nconverted from %s to sRGB" % profile
     return info
+
+
+SEND_GROUP = "RimStudio"
+
+
+def build_send_jsx(paths, subject_name=None):
+    """ExtendScript that places the finished layers in ONE group.
+
+    Every send replaces the group the previous send made, instead of stacking
+    another three layers on top - tweak-and-resend used to leave nine layers
+    after three goes. The group lands directly above the subject layer it was
+    pulled from, not at the top of the document over any adjustment layers, and
+    that subject is HIDDEN (never deleted) once the relit copy is in, so moving
+    either one cannot reveal the other underneath.
+
+    Strings go in through json.dumps: a layer name with a quote or backslash in
+    it would otherwise break the script.
+    """
+    q = json.dumps
+    jsx = ['if (!app.documents.length) { "NO DOC" } else {',
+           'var doc = app.activeDocument, added = [], flags = [];',
+           'var SUBJ = %s;' % q(subject_name),
+           'function findArt(n) { for (var i = 0; i < doc.artLayers.length; i++)'
+           ' if (doc.artLayers[i].name === n) return doc.artLayers[i]; return null; }',
+           'for (var g = doc.layerSets.length - 1; g >= 0; g--)',
+           '  if (doc.layerSets[g].name === %s) {' % q(SEND_GROUP),
+           '    try { doc.layerSets[g].remove(); flags.push("REPLACED"); } catch (eR) {} }',
+           'var subj = SUBJ ? findArt(SUBJ) : null;',
+           # layerSets.add() always lands at the top of the document (tested
+           # on Photoshop 2026 - the active layer does not steer it), so it is
+           # moved down to sit directly above the subject. Without a subject it
+           # stays on top, as sends always used to.
+           'var grp = doc.layerSets.add();',
+           'grp.name = %s;' % q(SEND_GROUP),
+           'if (subj) { try { grp.move(subj, ElementPlacement.PLACEBEFORE); } catch (eM) {} }']
+    # placed bottom-up: each new layer goes to the TOP of the group, so the
+    # first one written ends up underneath. Shadow under the subject, and the
+    # glow over BOTH - it is a lens effect on the finished frame, so it must not
+    # be trapped beneath the cut-out or its halo stops at the edge.
+    for key, name, blend in (("shadow", "RimStudio Shadow", None),
+                             ("relit", "RimStudio Relit", None),
+                             ("glow", "RimStudio Glow", "SCREEN")):
+        p = paths.get(key)
+        if not p:
+            continue
+        jsx += ['try {',
+                '  var d = app.open(new File(%s)); app.activeDocument = d;'
+                % q(p.replace("\\", "/")),
+                # The engine writes sRGB. Say so explicitly, then Photoshop
+                # CONVERTS the pixels when the layer lands in a document with
+                # another working space instead of reinterpreting the numbers.
+                '  try { d.colorProfileType = ColorProfileType.CUSTOM;',
+                '        d.colorProfileName = "sRGB IEC61966-2.1"; } catch (eA) {}',
+                '  var L = d.artLayers[0].duplicate(doc, ElementPlacement.PLACEATBEGINNING);',
+                '  d.close(SaveOptions.DONOTSAVECHANGES); app.activeDocument = doc;',
+                '  L.name = %s;' % q(name),
+                # an empty set only accepts INSIDE; after that, the top of it
+                '  if (grp.layers.length) L.move(grp.layers[0], ElementPlacement.PLACEBEFORE);',
+                '  else L.move(grp, ElementPlacement.INSIDE);']
+        if blend:
+            jsx.append('  L.blendMode = BlendMode.%s;' % blend)
+        jsx += ['  added.push(%s);' % q(name),
+                '} catch (e) { added.push("FAILED " + %s + ": " + e); }' % q(name)]
+    jsx += ['var relitIn = false;',
+            'for (var a = 0; a < added.length; a++) if (added[a] === "RimStudio Relit") relitIn = true;',
+            'if (subj && relitIn && subj.visible) { subj.visible = false; flags.push("HID"); }',
+            '"OK|" + added.join(", ") + "|" + flags.join(","); }']
+    return "\n".join(jsx)
 
 
 def send_to_photoshop(paths):
@@ -517,35 +667,7 @@ def send_to_photoshop(paths):
     Driven through PowerShell + COM rather than pywin32 so there is no extra
     dependency to install - the same bridge already proven for RimStudio.jsx.
     """
-    jsx = []
-    jsx.append('if (!app.documents.length) { "NO DOC" } else {')
-    jsx.append('var doc = app.activeDocument; var added = [];')
-    # placed bottom-up: each new layer goes to the TOP, so the first one written
-    # ends up underneath. Shadow under the subject, and the glow over BOTH -
-    # it is a lens effect on the finished frame, so it must not be trapped
-    # beneath the cut-out or its halo stops at the edge.
-    for key, name, blend in (("shadow", "RimStudio Shadow", None),
-                             ("relit", "RimStudio Relit", None),
-                             ("glow", "RimStudio Glow", "SCREEN")):
-        p = paths.get(key)
-        if not p:
-            continue
-        jsx.append('try {')
-        jsx.append('  var f = new File("%s");' % p.replace("\\", "/"))
-        jsx.append('  var d = app.open(f); app.activeDocument = d;')
-        # The engine writes sRGB. Say so explicitly, then Photoshop CONVERTS the
-        # pixels when the layer lands in a document with another working space
-        # instead of reinterpreting the numbers and shifting every colour.
-        jsx.append('  try { d.colorProfileType = ColorProfileType.CUSTOM;')
-        jsx.append('        d.colorProfileName = "sRGB IEC61966-2.1"; } catch (eA) {}')
-        jsx.append('  d.artLayers[0].duplicate(doc, ElementPlacement.PLACEATBEGINNING);')
-        jsx.append('  d.close(SaveOptions.DONOTSAVECHANGES); app.activeDocument = doc;')
-        jsx.append('  doc.artLayers[0].name = "%s"; added.push("%s");' % (name, name))
-        if blend:
-            jsx.append('  doc.artLayers[0].blendMode = BlendMode.%s;' % blend)
-        jsx.append('} catch (e) { added.push("FAILED %s: " + e); }' % name)
-    jsx.append('added.join(", "); }')
-    script = "\n".join(jsx)
+    script = build_send_jsx(paths, STATE.get("ps_subject"))
 
     ps = ("$ps = New-Object -ComObject Photoshop.Application; "
           "$ps.DoJavaScript(@'\n" + script + "\n'@)")
@@ -558,7 +680,17 @@ def send_to_photoshop(paths):
             return {"error": "Photoshop has no document open - open one first."}
         if not out:
             return {"error": "Photoshop did not respond. Is it running and idle?"}
-        return {"msg": "placed in Photoshop: " + out}
+        if not out.startswith("OK|"):
+            return {"error": "Photoshop said: " + out[-300:]}
+        _, placed, flags = (out.split("|") + ["", ""])[:3]
+        msg = "placed in Photoshop: " + placed
+        if "REPLACED" in flags:
+            msg += "\n(replaced the previous RimStudio group)"
+        if "HID" in flags:
+            msg += "\noriginal layer hidden, not deleted"
+        if "FAILED" in placed:
+            return {"error": msg}
+        return {"msg": msg}
     except subprocess.TimeoutExpired:
         return {"error": "Photoshop was busy for 3 minutes - it may be mid-operation."}
     except Exception as e:

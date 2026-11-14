@@ -94,12 +94,31 @@ layer becomes the subject and everything else visible becomes the plate. No cut-
 yet? **Cut out subject** runs Photoshop's Select Subject and hides the original rather
 than deleting it.
 
-Then **Auto match**, adjust, and **Send to Photoshop**. It comes back as up to three
+Then **Auto match**, adjust, and **Send to Photoshop**. It comes back as a
+**RimStudio** group placed directly above your subject layer, holding up to three
 layers — the relit subject, a ground shadow underneath it, and the glow on top as a
-Screen layer. Your background is never modified.
+Screen layer. The original subject layer is hidden, never deleted, and your
+background is never modified. Sending again replaces that group rather than
+stacking another copy.
 
-`Hold to compare` and the split view sit under the preview. Ctrl+wheel zooms,
-Ctrl+Z undoes.
+Not finishing in Photoshop? **Save image** writes the finished picture as one PNG;
+**Save layers** writes the three layers separately. Neither overwrites an earlier
+save.
+
+The panel reopens with the sliders you last used.
+
+| | |
+|---|---|
+| Hold `\` (or the compare button) | before / after |
+| Double-click a slider | reset it |
+| Right-click a slider | type an exact value |
+| Shift-drag a slider | fine adjustment |
+| Arrow keys over a slider | nudge (Shift for ×10) |
+| Ctrl+wheel, Ctrl +/−, Ctrl+0 | zoom, fit |
+| Ctrl+Z / Ctrl+Y | undo / redo |
+
+If something fails, the panel shows one line and the full details go to
+`%APPDATA%\RimStudio\rimstudio.log`.
 
 ## Standalone
 

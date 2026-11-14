@@ -223,13 +223,23 @@ class Slider(tk.Canvas):
         self.ty = 32
         self._hover = False
         self._drag = False
+        self._last_x = None
+        self._raw = self.value        # unrounded, so slow drags still move
+        self._entry = None
         self.bind("<Configure>", self._resize)
-        self.bind("<Button-1>", self._click)
-        self.bind("<B1-Motion>", self._click)
+        self.bind("<Button-1>", self._press)
+        self.bind("<B1-Motion>", self._motion)
         self.bind("<ButtonRelease-1>", self._done)
         self.bind("<Double-Button-1>", self._reset)
+        self.bind("<Button-3>", self._type_value)
         self.bind("<Enter>", self._enter)
         self.bind("<Leave>", self._leave)
+        for key, n in (("<Left>", -1), ("<Right>", 1), ("<Down>", -1), ("<Up>", 1)):
+            self.bind(key, lambda e, n=n: self._nudge(n, e))
+        # the controls are invisible otherwise; a long delay so sweeping the
+        # mouse down the column does not pop a tooltip on every row
+        Tip(self, "double-click: reset   right-click: type a value\n"
+                  "Shift-drag: fine   arrow keys: nudge", delay=1400)
         self._draw()
 
     # ---- geometry
@@ -255,12 +265,16 @@ class Slider(tk.Canvas):
         return ("%.2f" % v).rstrip("0").rstrip(".") or "0"
 
     def _draw(self):
-        self.delete("all")
+        # everything except the typing box, which lives on as a canvas window
+        for item in self.find_all():
+            if "entry" not in self.gettags(item):
+                self.delete(item)
         moved = abs(self.value - self.default) > 1e-9
         self.create_text(2, 11, text=self.label, anchor="w",
                          fill=INK if (self._hover or moved) else DIM, font=F_SMALL)
-        self.create_text(self.w - 2, 11, text=self._fmt(), anchor="e",
-                         fill=ACC if moved else DIM, font=F_MONO)
+        if getattr(self, "_entry", None) is None:
+            self.create_text(self.w - 2, 11, text=self._fmt(), anchor="e",
+                             fill=ACC if moved else DIM, font=F_MONO)
         x = self._x_of(self.value)
         round_rect(self, self.pad, self.ty - 2, self.w - self.pad, self.ty + 2, 2,
                    fill="#23232c", outline="")
@@ -275,25 +289,56 @@ class Slider(tk.Canvas):
     def _enter(self, _e):
         self._hover = True
         self.configure(cursor="hand2")
+        # take keyboard focus so the arrow keys reach the slider under the mouse
+        if self._entry is None:
+            try:
+                self.focus_set()
+            except Exception:
+                pass
         self._draw()
 
     def _leave(self, _e):
         self._hover = False
         self._draw()
 
-    def _click(self, e):
+    def _snap(self, v):
+        v = round(v / self.step) * self.step
+        return max(self.lo, min(self.hi, v))
+
+    def _commit(self, v, released):
+        v = self._snap(v)
+        changed = v != self.value
+        self.value = v
+        self._draw()
+        if self.on_change and (changed or released):
+            self.on_change(self.key, v, released)
+
+    def _press(self, e):
+        """Grabbing the HANDLE keeps its value and drags from there; clicking
+        the bare track jumps to that point. Jumping on every click meant a
+        slightly-off grab changed the value before the drag even started."""
         self._drag = True
-        v = self._v_of(e.x)
-        if v != self.value:
-            self.value = v
+        self._last_x = e.x
+        if abs(e.x - self._x_of(self.value)) <= 9:
+            self._raw = self.value
             self._draw()
-            if self.on_change:
-                self.on_change(self.key, v, False)
         else:
-            self._draw()
+            self._raw = self._v_of(e.x)
+            self._commit(self._raw, False)
+
+    def _motion(self, e):
+        if self._last_x is None:
+            return
+        span = (self.hi - self.lo) / max(self.w - 2 * self.pad, 1)
+        fine = 0.15 if (e.state & 0x0001) else 1.0          # Shift held
+        self._raw = max(self.lo, min(self.hi,
+                                     self._raw + (e.x - self._last_x) * span * fine))
+        self._last_x = e.x
+        self._commit(self._raw, False)
 
     def _done(self, _e):
         self._drag = False
+        self._last_x = None
         self._draw()
         if self.on_change:
             self.on_change(self.key, self.value, True)
@@ -303,12 +348,52 @@ class Slider(tk.Canvas):
         if self.on_change:
             self.on_change(self.key, self.value, True)
 
+    def _nudge(self, n, e):
+        mult = 10 if (e.state & 0x0001) else 1               # Shift = big step
+        self._commit(self.value + n * self.step * mult, True)
+        return "break"
+
+    def _type_value(self, _e=None):
+        """Right-click: an entry over the value readout, for an exact number."""
+        if self._entry is not None:
+            return
+        ent = tk.Entry(self, width=7, bg=CARD, fg=INK, insertbackground=INK,
+                       relief="flat", font=F_MONO, justify="right",
+                       highlightthickness=1, highlightcolor=ACC,
+                       highlightbackground=LINE)
+        ent.insert(0, self._fmt())
+        ent.select_range(0, "end")
+        win = self.create_window(self.w - 2, 11, window=ent, anchor="e", tags="entry")
+        self._entry = ent
+        self._draw()                     # drop the readout the entry covers
+
+        def close(save):
+            if self._entry is None:
+                return
+            txt = ent.get().strip().replace(",", ".")
+            self._entry = None
+            self.delete(win)
+            ent.destroy()
+            if save:
+                try:
+                    self._commit(float(txt), True)
+                except ValueError:
+                    pass            # not a number: leave the value as it was
+            self._draw()
+
+        ent.bind("<Return>", lambda e: close(True))
+        ent.bind("<KP_Enter>", lambda e: close(True))
+        ent.bind("<Escape>", lambda e: close(False))
+        ent.bind("<FocusOut>", lambda e: close(True))
+        ent.focus_set()
+
     # ---- api
     def get(self):
         return self.value
 
     def set(self, v):
         self.value = max(self.lo, min(self.hi, float(v)))
+        self._raw = self.value
         self._draw()
 
 
@@ -476,8 +561,12 @@ class Toast(tk.Canvas):
             self.configure(height=1)
             self.delete("all")
             return
-        lines = self._text.count("\n") + 1
-        self.configure(height=max(32, 14 + 14 * min(lines, 6)))
+        # Count WRAPPED lines too, not just newlines - a long first line used
+        # to wrap and push the last line out of the card. Consolas 8pt is
+        # about 6px a character.
+        per = max(10, (self.w - 20) // 6)
+        lines = sum(max(1, -(-len(ln) // per)) for ln in self._text.split("\n"))
+        self.configure(height=max(32, 14 + 14 * min(lines, 8)))
         self._draw()
 
     def _draw(self):

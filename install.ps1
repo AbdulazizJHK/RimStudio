@@ -31,9 +31,7 @@ param(
     [string]$InstallTo
 )
 
-$ErrorActionPreference = 'Stop'
-
-$REPO       = 'AbdulazizJHK/RimStudio'
+$REPO      = 'AbdulazizJHK/RimStudio'
 $BRANCH     = 'main'
 $CFG_DIR    = Join-Path $env:APPDATA 'RimStudio'
 $CFG_FILE   = Join-Path $CFG_DIR 'config.txt'
@@ -45,7 +43,22 @@ function Say  ($m) { Write-Host "  $m" }
 function Step ($m) { Write-Host "`n$m" -ForegroundColor Cyan }
 function Good ($m) { Write-Host "  $m" -ForegroundColor Green }
 function Warn ($m) { Write-Host "  $m" -ForegroundColor Yellow }
-function Die  ($m) { Write-Host "`n$m`n" -ForegroundColor Red; exit 1 }
+# Piped from the web (irm | iex) the script runs inside the user's own session,
+# where `exit` would close their window before they can read why. Throw there.
+$FromWeb = -not $PSScriptRoot
+function Die  ($m) {
+    Write-Host "`n$m`n" -ForegroundColor Red
+    if ($FromWeb) { throw 'RimStudio install stopped.' } else { exit 1 }
+}
+
+# Runs a command elevated without writing a script to %TEMP% first: a file
+# there could be swapped between being written and being run as admin.
+function Invoke-Elevated ([string[]]$lines) {
+    $code = ($lines -join "`r`n")
+    $enc  = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
+    Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden `
+        -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$enc
+}
 
 
 # ---------------------------------------------------------------- Photoshop --
@@ -90,11 +103,9 @@ if ($Uninstall) {
     }
     if ($stubs.Count) {
         $lines = $stubs | ForEach-Object { "Remove-Item -LiteralPath '$($_ -replace "'","''")' -Force -ErrorAction SilentlyContinue" }
-        $tmp = Join-Path $env:TEMP 'rimstudio_uninstall_elevated.ps1'
-        Set-Content -LiteralPath $tmp -Value ($lines -join "`r`n") -Encoding UTF8
         Say 'Removing the Photoshop menu entry (this needs one admin prompt)...'
-        Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$tmp`""
-        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        # A declined prompt must not stop the rest of the uninstall.
+        try { Invoke-Elevated $lines | Out-Null } catch { Warn 'The admin prompt was declined.' }
         foreach ($p in $stubs) {
             if (Test-Path $p) { Warn "Still there: $p" } else { Good "Removed $p" }
         }
@@ -102,11 +113,14 @@ if ($Uninstall) {
         Say 'No menu entry found.'
     }
 
-    if (Test-Path $VENV_DIR) { Remove-Item $VENV_DIR -Recurse -Force; Good "Removed $VENV_DIR" }
-    if (Test-Path $CFG_DIR)  { Remove-Item $CFG_DIR  -Recurse -Force; Good "Removed $CFG_DIR" }
+    foreach ($d in $VENV_DIR, $CFG_DIR) {
+        if (-not (Test-Path $d)) { continue }
+        try   { Remove-Item $d -Recurse -Force -ErrorAction Stop; Good "Removed $d" }
+        catch { Warn "Could not remove $d - close RimStudio if it is open, then run this again." }
+    }
 
     Write-Host "`nDone. The tool folder itself was left alone - delete it if you want it gone.`n"
-    exit 0
+    return
 }
 
 
@@ -132,21 +146,22 @@ if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot $MARKER))) {
     $tool = if ($InstallTo) { $InstallTo } else { Join-Path $env:LOCALAPPDATA 'Programs\RimStudio' }
     Say "Downloading $REPO ($BRANCH) into:"
     Say "  $tool"
-    $zip = Join-Path $env:TEMP 'rimstudio_download.zip'
-    $out = Join-Path $env:TEMP 'rimstudio_download'
-    if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+    $tag = [guid]::NewGuid().ToString('N')
+    $zip = Join-Path $env:TEMP "rimstudio_$tag.zip"
+    $out = Join-Path $env:TEMP "rimstudio_$tag"
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest "https://github.com/$REPO/archive/refs/heads/$BRANCH.zip" -OutFile $zip -UseBasicParsing
-        Expand-Archive -LiteralPath $zip -DestinationPath $out -Force
+        Invoke-WebRequest "https://github.com/$REPO/archive/refs/heads/$BRANCH.zip" -OutFile $zip -UseBasicParsing -ErrorAction Stop
+        Expand-Archive -LiteralPath $zip -DestinationPath $out -Force -ErrorAction Stop
+        $src = Get-ChildItem $out -Directory | Select-Object -First 1
+        if (-not $src) { throw 'the archive was empty' }
+        New-Item -ItemType Directory -Force -Path $tool -ErrorAction Stop | Out-Null
+        Copy-Item (Join-Path $src.FullName '*') $tool -Recurse -Force -ErrorAction Stop
     } catch {
         Die "Could not download the tool: $($_.Exception.Message)`n  Download the ZIP from https://github.com/$REPO yourself, unzip it, and run install.ps1 inside it."
+    } finally {
+        Remove-Item $zip, $out -Recurse -Force -ErrorAction SilentlyContinue
     }
-    $src = Get-ChildItem $out -Directory | Select-Object -First 1
-    if (-not $src) { Die 'The downloaded archive was empty.' }
-    New-Item -ItemType Directory -Force -Path $tool | Out-Null
-    Copy-Item (Join-Path $src.FullName '*') $tool -Recurse -Force
-    Remove-Item $zip, $out -Recurse -Force -ErrorAction SilentlyContinue
     Good 'Downloaded.'
 }
 
@@ -154,11 +169,29 @@ if (-not (Test-Path (Join-Path $tool $MARKER))) {
     Die "That folder has no $MARKER in it, so it is not the tool."
 }
 
+# From the web, hand over to the installer that came with the files, in its own
+# process: switches work, `exit` is safe, and no settings leak into the user's
+# session. It is also the copy that matches the files just downloaded.
+if ($FromWeb) {
+    $self = Join-Path $tool 'install.ps1'
+    if (-not (Test-Path $self)) { Die "install.ps1 is missing from $tool" }
+    $pass = @()
+    if ($NoMenu) { $pass += '-NoMenu' }
+    if ($NoVenv) { $pass += '-NoVenv' }
+    & (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File $self @pass
+    return
+}
+$ErrorActionPreference = 'Stop'
+
 
 # ------------------------------------------------------------ 2. find Python --
 Step '[2/5] Looking for Python 3.9 or newer'
 
+# Windows PowerShell 5.1 turns every stderr line of a redirected native command
+# into a terminating error under 'Stop' - so a Python that merely prints a
+# warning would be thrown away. These helpers run with 'Continue', locally.
 function Test-PythonExe ($exe) {
+    $ErrorActionPreference = 'Continue'
     if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { return $null }
     try {
         $v = & $exe -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
@@ -170,13 +203,20 @@ function Test-PythonExe ($exe) {
 }
 
 function Find-Python {
+    $ErrorActionPreference = 'Continue'
     $seen = @()
     # The py launcher knows about every Python on the machine, so ask it first.
-    $pyl = Join-Path $env:WINDIR 'py.exe'
-    if (Test-Path $pyl) {
-        foreach ($flag in '-3.13','-3.12','-3.11','-3') {
+    # It lives in %WINDIR% for all-users installs, under LOCALAPPDATA for
+    # per-user ones (the python.org default, and what winget installs below).
+    $launchers = @(
+        (Join-Path $env:WINDIR 'py.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Python\Launcher\py.exe')
+    ) + @(Get-Command py.exe -All -ErrorAction SilentlyContinue | ForEach-Object Source)
+    $pyl = $launchers | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+    if ($pyl) {
+        foreach ($flag in '-3.13','-3.12','-3.14','-3.11','-3') {
             try { $p = & $pyl $flag -c "import sys; print(sys.executable)" 2>$null } catch { $p = $null }
-            if ($p) { $seen += $p.Trim() }
+            if ($LASTEXITCODE -eq 0 -and $p) { $seen += "$p".Trim() }
         }
     }
     foreach ($n in 'python.exe') {
@@ -226,6 +266,13 @@ if ($NoVenv) {
     & $py.Exe -m pip install --user --upgrade --disable-pip-version-check numpy Pillow
     if ($LASTEXITCODE -ne 0) { Die 'pip failed. Run the same command by hand to see why.' }
 } else {
+    $venvPy = Join-Path $VENV_DIR 'Scripts\python.exe'
+    # A venv points at the Python it was built from; if that one was upgraded
+    # or uninstalled since, the venv is dead and pip would fail cryptically.
+    if ((Test-Path $VENV_DIR) -and -not (Test-PythonExe $venvPy)) {
+        Warn 'The existing environment no longer runs (its Python moved?) - rebuilding it.'
+        Remove-Item $VENV_DIR -Recurse -Force
+    }
     if (Test-Path $VENV_DIR) {
         Say 'Reusing the existing environment.'
     } else {
@@ -237,21 +284,29 @@ if ($NoVenv) {
             Remove-Item $VENV_DIR -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
-    if (Test-Path (Join-Path $VENV_DIR 'Scripts\python.exe')) {
-        $runtime  = Join-Path $VENV_DIR 'Scripts\python.exe'
+    $pipArgs = @('-m','pip','install','--upgrade','--disable-pip-version-check')
+    if (Test-Path $venvPy) {
+        $runtime  = $venvPy
         $runtimeW = Join-Path $VENV_DIR 'Scripts\pythonw.exe'
+    } else {
+        $pipArgs += '--user'   # a system Python in Program Files is not writable
     }
     $req = Join-Path $tool 'requirements.txt'
-    if (Test-Path $req) { & $runtime -m pip install --upgrade --disable-pip-version-check -r "$req" }
-    else                { & $runtime -m pip install --upgrade --disable-pip-version-check numpy Pillow }
+    if (Test-Path $req) { & $runtime @pipArgs -r "$req" }
+    else                { & $runtime @pipArgs numpy Pillow }
     if ($LASTEXITCODE -ne 0) { Die 'pip failed. Check your internet connection or any proxy, then run this again.' }
 }
 
 # tkinter is what draws the window. It ships with python.org builds but some
 # rebuilds and most conda ones leave it out, and the failure is invisible
 # because the panel launches with pythonw (no console to print to).
-$check = & $runtime -c "import numpy, PIL, tkinter; print(numpy.__version__, PIL.__version__)" 2>&1
-if ($LASTEXITCODE -ne 0) {
+# Captured with 'Continue' so a failed import reaches the message below rather
+# than surfacing as a raw PowerShell NativeCommandError.
+$ErrorActionPreference = 'Continue'
+$check = (& $runtime -c "import numpy, PIL, tkinter; print(numpy.__version__, PIL.__version__)" 2>&1 | ForEach-Object { "$_" }) -join "`n"
+$checkCode = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+if ($checkCode -ne 0) {
     Die "The environment is not usable:`n$check`n  If tkinter is the missing one, reinstall Python from python.org and keep the `"tcl/tk and IDLE`" option ticked."
 }
 Good "numpy + Pillow + tkinter OK ($check)"
@@ -306,19 +361,18 @@ if ($NoMenu) {
             $s = ($stub -replace "'","''")
             $lines += "Copy-Item -LiteralPath '$s' -Destination '$d' -Force"
         }
-        $tmp = Join-Path $env:TEMP 'rimstudio_install_elevated.ps1'
-        Set-Content -LiteralPath $tmp -Value ($lines -join "`r`n") -Encoding UTF8
         Say 'Copying the menu entry into Program Files (one admin prompt)...'
-        try {
-            $p = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$tmp`""
-        } catch {
-            $p = $null
-            Warn 'The admin prompt was declined.'
-        }
-        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        try   { Invoke-Elevated $lines | Out-Null }
+        catch { Warn 'The admin prompt was declined.' }
 
+        # Count only copies identical to the stub: an older file of the same
+        # name already sitting there must not pass for a fresh install.
+        $want = (Get-FileHash -LiteralPath $stub).Hash
         $ok = 0
-        foreach ($t in $targets) { if (Test-Path (Join-Path $t 'RimStudio.jsx')) { $ok++ } }
+        foreach ($t in $targets) {
+            $dst = Join-Path $t 'RimStudio.jsx'
+            if ((Test-Path $dst) -and (Get-FileHash -LiteralPath $dst).Hash -eq $want) { $ok++ }
+        }
         if ($ok) { Good "Installed into $ok Photoshop install$(if($ok -ne 1){'s'})." }
         else {
             Warn 'Could not write into Program Files.'

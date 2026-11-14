@@ -70,20 +70,23 @@ MATCH = [("m_exposure", "Exposure", 0, 1, .85, .01),
          ("defringe", "Defringe edge", 0, 1, .7, .01),
          ("grain", "Match grain", 0, 1, .8, .01),
          ("focus", "Match focus", 0, 1, 0, .01)]
-LIGHT = [("glow", "Glow", 0, 2.5, 1.0, .05),
-         ("bg_glow", "Bloom (whole frame)", 0, 1, 0, .02),
-         ("glow_thr", "Glow threshold", 0, 1, .5, .02),
-         ("glow_colour", "Glow colour", 0, 3, 1.5, .05),
-         ("reach", "Reach", 20, 500, 260, 5),
-         ("rim_reach", "Rim reach", 10, 300, 70, 5),
-         ("soft_w", "Rim width", 4, 120, 34, 1),
-         ("core_w", "Core width", 1, 60, 9, 1),
-         ("rim", "Rim strength", 0, 4, 1.35, .05),
-         ("core", "Core strength", 0, 4, 1.9, .05),
-         ("wrap", "Spill", 0, 3, .55, .05),
-         ("keep_shadows", "Keep shadows", 0, 1, .5, .02),
-         ("sat", "Light saturation", 0, 3, 1.45, .05),
-         ("threshold", "Emit threshold", 0, .6, .1, .01)]
+# The light controls used to be one 14-slider column. Split by what you are
+# deciding: how much glow, how strong the rim, and - folded away, because it is
+# rarely touched once a plate is set up - the shape of the rim.
+GLOW = [("glow", "Glow", 0, 2.5, 1.0, .05),
+        ("bg_glow", "Bloom (whole frame)", 0, 1, 0, .02),
+        ("glow_thr", "Glow threshold", 0, 1, .5, .02),
+        ("glow_colour", "Glow colour", 0, 3, 1.5, .05)]
+RIM = [("rim", "Rim strength", 0, 4, 1.35, .05),
+       ("core", "Core strength", 0, 4, 1.9, .05),
+       ("wrap", "Spill", 0, 3, .55, .05),
+       ("keep_shadows", "Keep shadows", 0, 1, .5, .02),
+       ("sat", "Light saturation", 0, 3, 1.45, .05)]
+RIM_SHAPE = [("reach", "Reach", 20, 500, 260, 5),
+             ("rim_reach", "Rim reach", 10, 300, 70, 5),
+             ("soft_w", "Rim width", 4, 120, 34, 1),
+             ("core_w", "Core width", 1, 60, 9, 1),
+             ("threshold", "Emit threshold", 0, .6, .1, .01)]
 SHADOW = [("shadow", "Shadow", 0, 1, 0, .01),
           ("sh_lean", "Lean", -400, 400, 0, 5),
           ("sh_squash", "Squash", .05, 1, .28, .01),
@@ -133,7 +136,9 @@ class App:
         # window comes back up behind whatever was in front.
         for _ms in (250, 700, 1200):
             root.after(_ms, lambda: self._raise(root))
+        self._restore_session()          # before history, so Undo starts here
         self._hist_init()
+        root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(50, self._drain)
         self.root.bind("<Configure>", self._maybe_refit)
         self._last_arr = None
@@ -326,6 +331,22 @@ class App:
         except Exception:
             pass
 
+    def _restore_session(self):
+        """Open with the sliders the last session closed on. Every launch used
+        to start from the defaults, so a look dialled in yesterday was gone."""
+        last = core.load_settings()
+        n = 0
+        for k, v in last.items():
+            if k in self.sliders:
+                self.sliders[k].set(v)
+                n += 1
+        if n:
+            self.preset_name.config(text="restored from last session")
+
+    def close(self):
+        core.save_settings(self.params())
+        self.root.destroy()
+
     def minimise(self):
         """Tk refuses to iconify an overrideredirect window, so hand the caption
         back for the moment it takes to minimise and take it away again on the
@@ -493,7 +514,7 @@ class App:
         # our own caption, then a hairline so the borderless window still has a
         # defined edge against a dark desktop
         self.titlebar = TitleBar(self.root, "RimStudio", self.minimise,
-                                 self.maximise, self.root.destroy,
+                                 self.maximise, self.close,
                                  icon=getattr(self, "icon_img", None),
                                  on_resize_start=self._grip_start,
                                  on_resize_drag=self._grip_drag)
@@ -534,7 +555,7 @@ class App:
         # Comparison lives under the picture it compares, not in the sidebar
         # among the settings - it changes what you are looking at, not the file.
         cmp_btn = Button(zbox, "", None, width=34, height=26, icon="compare",
-                         tip="Hold to see the original")
+                         tip="Hold to see the original  (or hold \\)")
         cmp_btn.pack(side="left", padx=(14, 0))
         cmp_btn.bind("<ButtonPress-1>", lambda e: self.compare(True), add="+")
         cmp_btn.bind("<ButtonRelease-1>", lambda e: self.compare(False), add="+")
@@ -564,6 +585,11 @@ class App:
         self.root.bind_all("<Control-y>", self.redo)
         # capital Z means Shift is down, which is the other common redo
         self.root.bind_all("<Control-Z>", self.redo)
+        # Hold backslash for before/after, as Photoshop uses it for the quick
+        # mask overlay. Windows auto-repeat sends repeated presses and a single
+        # release, and compare() ignores a repeat of the state it is already in.
+        self.root.bind_all("<KeyPress-backslash>", lambda e: self._compare_key(e, True))
+        self.root.bind_all("<KeyRelease-backslash>", lambda e: self._compare_key(e, False))
 
         # --- scrolling sidebar
         canvas = self._sidecanvas = tk.Canvas(side, bg=PANEL,
@@ -657,17 +683,23 @@ class App:
                height=26, tip="Set Match focus only - the main Auto leaves it alone").pack(
             side="right")
 
-        sec2 = Section(self.col, "Light from the background", False)
+        sec2 = Section(self.col, "Rim light", False)
         sec2.pack(fill="x", pady=(8, 0), **pad)
-        # the two glow controls first, with their own auto directly under them,
-        # then the rim shaping. Bloom is measured, but how far to push it is a
-        # look call, so it stays off the main Auto - same as Match focus.
-        self._add(sec2.body, LIGHT[:4])
-        grow = tk.Frame(sec2.body, bg=PANEL)
+        self._add(sec2.body, RIM)
+
+        sec2b = Section(self.col, "Rim shape (advanced)", False)
+        sec2b.pack(fill="x", pady=(8, 0), **pad)
+        self._add(sec2b.body, RIM_SHAPE)
+
+        sec2c = Section(self.col, "Glow", False)
+        sec2c.pack(fill="x", pady=(8, 0), **pad)
+        # Bloom is measured, but how far to push it is a look call, so it has
+        # its own Auto and stays off the main one - same as Match focus.
+        self._add(sec2c.body, GLOW)
+        grow = tk.Frame(sec2c.body, bg=PANEL)
         grow.pack(fill="x", pady=(0, 4))
         Button(grow, "Auto glow", self.auto_glow, width=104, height=26,
                tip="Set Bloom only - the main Auto leaves it alone").pack(side="right")
-        self._add(sec2.body, LIGHT[4:])
 
         sec3 = Section(self.col, "Ground shadow", False)
         sec3.pack(fill="x", pady=(8, 0), **pad)
@@ -684,12 +716,19 @@ class App:
         self.b_send.pack(fill="x", pady=(8, 4))
         orow = tk.Frame(out.body, bg=PANEL)
         orow.pack(fill="x", pady=2)
-        orow.columnconfigure(0, weight=1, uniform="out")
-        orow.columnconfigure(1, weight=1, uniform="out")
-        self.b_save_png = Button(orow, "Save PNG", self.apply_only)
+        for c in range(3):
+            orow.columnconfigure(c, weight=1, uniform="out")
+        # Layers = the separate relit / shadow / glow PNGs Photoshop gets.
+        # Image = the finished picture flattened, for anyone not finishing in
+        # Photoshop - before this there was no way to get it out at all.
+        self.b_save_png = Button(orow, "Save layers", self.apply_only,
+                                 tip="Relit subject, shadow and glow as separate PNGs")
         self.b_save_png.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        self.b_save_comp = Button(orow, "Save image", self.save_composite,
+                                  tip="The finished picture as one flat PNG")
+        self.b_save_comp.grid(row=0, column=1, sticky="ew", padx=3)
         Button(orow, "Open folder", self.open_output_folder).grid(
-            row=0, column=1, sticky="ew", padx=(3, 0))
+            row=0, column=2, sticky="ew", padx=(3, 0))
 
         self.msg = Toast(self.col)
         self.msg.pack(fill="x", pady=(6, 18), **pad)
@@ -814,7 +853,7 @@ class App:
                                          p, pre=core.STATE["pre_" + k])
                 self.results.put(("img", arr))
             except Exception:
-                self.results.put(("err", traceback.format_exc(limit=3)))
+                self.results.put(("err", traceback.format_exc()))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -840,10 +879,12 @@ class App:
                 elif kind == "fail":
                     self.prog.stop()
                     self._busy_ui(False)
-                    self.msg.show(payload[-320:], "err")
+                    self.msg.show(self._friendly(payload), "err")
                 elif kind == "err":
                     self.busy = False
-                    self.msg.show(payload[-320:], "err")
+                    self.msg.show(self._friendly(payload), "err")
+                elif kind == "call":
+                    payload()
                 elif kind == "msg":
                     self.msg.show(payload[0], payload[1])
                 elif kind == "stats":
@@ -860,10 +901,26 @@ class App:
             # updating while the app still looks alive. Never let that happen.
             self.busy = False
             try:
-                self.msg.show(traceback.format_exc(limit=3)[-320:], "err")
+                self.msg.show(self._friendly(traceback.format_exc()), "err")
             except Exception:
                 pass
         self.root.after(40, self._drain)
+
+    @staticmethod
+    def _friendly(text):
+        """One readable line for the panel; the full traceback goes to the log.
+
+        Messages the app wrote itself ("Photoshop has no document open") pass
+        through untouched - only a real traceback gets cut down to its last
+        line, which is where Python puts the actual complaint."""
+        text = str(text or "").strip()
+        if "Traceback (most recent call last)" not in text:
+            return text[-400:]
+        log = core.log_error(text)
+        last = text.splitlines()[-1]
+        if len(last) > 160:
+            last = last[:157] + "..."
+        return "%s\n\nfull details: %s" % (last, log)
 
     # ---------------------------------------------------------------- zoom
     def set_zoom(self, z, fit=False):
@@ -987,9 +1044,35 @@ class App:
         threading.Thread(target=fn, daemon=True).start()
 
     def _stats_text(self, s):
-        return ("subject L %-6s plate L %s\ncontrast  %-6s vs %s\ncast      %s vs %s"
-                % (s["subject_L"], s["plate_L"], s["subject_contrast"],
+        return ("%s\nsubject L %-6s plate L %s\ncontrast  %-6s vs %s\ncast      %s vs %s"
+                % (self.verdict(s), s["subject_L"], s["plate_L"], s["subject_contrast"],
                    s["plate_contrast"], s["subject_ab"], s["plate_ab"]))
+
+    @staticmethod
+    def verdict(s):
+        """The numbers in words: what is actually wrong with the paste-up.
+        Thresholds are roughly a just-noticeable difference in Lab - below them
+        the two already read as the same."""
+        bits = []
+        dL = s["subject_L"] - s["plate_L"]
+        if abs(dL) >= 5:
+            bits.append("brighter" if dL > 0 else "darker")
+        da = s["subject_ab"][0] - s["plate_ab"][0]      # + = more magenta
+        db = s["subject_ab"][1] - s["plate_ab"][1]      # + = more yellow
+        if abs(db) >= 3 or abs(da) >= 3:
+            if abs(db) >= abs(da):
+                bits.append("warmer" if db > 0 else "cooler")
+            else:
+                bits.append("more magenta" if da > 0 else "greener")
+        pc = max(s["plate_contrast"], 1e-6)
+        ratio = s["subject_contrast"] / pc
+        if ratio >= 1.25:
+            bits.append("punchier")
+        elif ratio <= 0.8:
+            bits.append("flatter")
+        if not bits:
+            return "subject already sits close to the plate"
+        return "subject is " + ", ".join(bits) + " than the plate"
 
     # ---------------------------------------------------------------- presets
     def preset_menu(self):
@@ -1028,11 +1111,16 @@ class App:
         if not p:
             self.msg.show('preset "%s" not found' % name, "warn")
             return
+        # A preset is a whole look. Anything it does not mention - a slider
+        # added after it was saved - goes back to its default, or the same
+        # preset would look different depending on what was done before it.
         applied = 0
-        for k, v in p.items():
-            if k in self.sliders:
-                self.sliders[k].set(v)
+        for k, s in self.sliders.items():
+            if k in p:
+                s.set(p[k])
                 applied += 1
+            else:
+                s.set(s.default)
         self.preset_name.config(text="preset: " + name)
         self._hist_push()
         self.msg.show('applied "%s"  (%d settings)' % (name, applied), "ok")
@@ -1040,10 +1128,11 @@ class App:
 
     def save_preset(self):
         from tkinter import simpledialog
+        cur = self.preset_name.cget("text")
         name = simpledialog.askstring("Save preset", "Name this look:",
                                       parent=self.root,
-                                      initialvalue=self.preset_name.cget("text")
-                                      .replace("preset: ", ""))
+                                      initialvalue=cur[len("preset: "):]
+                                      if cur.startswith("preset: ") else "")
         if not name:
             return
         r = core.save_preset(name, self.params())
@@ -1085,7 +1174,7 @@ class App:
                 self.results.put(("done", ("%s\n%d x %d" % (j["msg"], j["w"], j["h"]), "ok")))
                 self.render(fast=False)
             except Exception:
-                self.results.put(("fail", traceback.format_exc(limit=3)))
+                self.results.put(("fail", traceback.format_exc()))
         self._bg(work)
 
     def _caption(self, t):
@@ -1126,7 +1215,7 @@ class App:
                 self.results.put(("done", ("%s + %s" % (j["subject"], j["background"]), "ok")))
                 self.render(fast=False)
             except Exception:
-                self.results.put(("fail", traceback.format_exc(limit=3)))
+                self.results.put(("fail", traceback.format_exc()))
         self._bg(work)
 
     def auto(self):
@@ -1141,51 +1230,70 @@ class App:
                                              core.STATE["sub_prev"].shape[1])
                 self.results.put(("auto", rec))
             except Exception:
-                self.results.put(("err", traceback.format_exc(limit=3)))
+                self.results.put(("err", traceback.format_exc()))
         self._bg(work)
 
-    def auto_shadow(self):
+    def _measure(self, label, measure, apply):
+        """Run a measurement on a worker, then `apply` its result on the main
+        thread. These used to run on the UI thread, and on a large plate the
+        whole window froze until they returned."""
         if core.STATE["pre_prev"] is None:
             self.msg.show("pull or open images first", "warn")
             return
-        vals, m = rim_engine.auto_shadow(core.STATE["pre_prev"],
-                                         core.STATE["sub_prev"].shape[1])
+        self.msg.show(label + "...", "info")
+
+        def work():
+            try:
+                res = measure()
+                self.results.put(("call", lambda: apply(res)))
+            except Exception:
+                self.results.put(("err", traceback.format_exc()))
+        self._bg(work)
+
+    def _set_and_render(self, vals):
         for k, v in vals.items():
             if k in self.sliders:
                 self.sliders[k].set(v)
         self._hist_push()
-        if vals["shadow"] <= 0:
-            self.msg.show("no shadow: %s" % m["ground"], "warn")
-        else:
-            self.msg.show("shadow %.2f   (light at %d,%d - it falls the other way)"
-                          % (vals["shadow"], m["light_at"][0], m["light_at"][1]),
-                          "ok")
         self.render(fast=False)
+
+    def auto_shadow(self):
+        def apply(res):
+            vals, m = res
+            self._set_and_render(vals)
+            if vals["shadow"] <= 0:
+                self.msg.show("no shadow: %s" % m["ground"], "warn")
+            else:
+                self.msg.show("shadow %.2f   (light at %d,%d - it falls the other way)"
+                              % (vals["shadow"], m["light_at"][0], m["light_at"][1]),
+                              "ok")
+        self._measure("finding the ground and the light",
+                      lambda: rim_engine.auto_shadow(core.STATE["pre_prev"],
+                                                     core.STATE["sub_prev"].shape[1]),
+                      apply)
 
     def auto_glow(self):
-        if core.STATE["pre_prev"] is None:
-            self.msg.show("pull or open images first", "warn")
-            return
-        amt, m = rim_engine.auto_glow(core.STATE["pre_prev"],
-                                      core.STATE["sub_prev"].shape[1])
-        self.sliders["bg_glow"].set(amt)
-        self._hist_push()
-        self.msg.show("bloom %.2f   (brightness step across the edge is %.1f L)"
-                      % (amt, m["edge_step_L"]), "ok")
-        self.render(fast=False)
+        def apply(res):
+            amt, m = res
+            self._set_and_render({"bg_glow": amt})
+            self.msg.show("bloom %.2f   (brightness step across the edge is %.1f L)"
+                          % (amt, m["edge_step_L"]), "ok")
+        self._measure("measuring the edge",
+                      lambda: rim_engine.auto_glow(core.STATE["pre_prev"],
+                                                   core.STATE["sub_prev"].shape[1]),
+                      apply)
 
     def auto_focus(self):
-        if core.STATE["pre_prev"] is None:
-            self.msg.show("pull or open images first", "warn")
-            return
-        amt, m = rim_engine.auto_focus(core.STATE["pre_prev"])
-        self.sliders["focus"].set(amt)
-        self._hist_push()
-        px = m["solved_px"]
-        self.msg.show("focus %.2f   (plate is %.0f%% as sharp as the subject%s)"
-                      % (amt, m["sharp_ratio"] * 100,
-                         ", %.1fpx blur" % px if px else ""), "ok")
-        self.render(fast=False)
+        def apply(res):
+            amt, m = res
+            self._set_and_render({"focus": amt})
+            px = m["solved_px"]
+            self.msg.show("focus %.2f   (plate is %.0f%% as sharp as the subject%s)"
+                          % (amt, m["sharp_ratio"] * 100,
+                             ", %.1fpx blur" % px if px else ""), "ok")
+        self._measure("comparing sharpness",
+                      lambda: rim_engine.auto_focus(core.STATE["pre_prev"]),
+                      apply)
 
     def _apply_auto(self, rec):
         m = rec.pop("_measured", {})
@@ -1199,6 +1307,13 @@ class App:
         self._hist_push()
         self.msg.show("auto match applied - adjust from here", "ok")
         self.render(fast=False)
+
+    def _compare_key(self, e, on):
+        # a backslash typed into a text box (preset name, slider value) is text
+        if isinstance(e.widget, (tk.Entry, tk.Text)):
+            return None
+        self.compare(on)
+        return "break"
 
     def compare(self, on):
         if self.comparing == on:
@@ -1288,6 +1403,23 @@ class App:
     def apply_only(self):
         self._output(send=False)
 
+    def save_composite(self):
+        if core.STATE["sub_full"] is None:
+            self.msg.show("nothing loaded", "warn")
+            return
+        self.msg.show("", "info")
+        self._busy_ui(True)
+        self._prog_start("rendering the finished image")
+        p = self.params()
+
+        def work():
+            try:
+                out = core.render_composite(p)
+                self.results.put(("done", ("written:\n" + out, "ok")))
+            except Exception:
+                self.results.put(("fail", traceback.format_exc()))
+        self._bg(work)
+
     def send(self):
         self._output(send=True)
 
@@ -1299,15 +1431,19 @@ class App:
         self._busy_ui(True)
         self._prog_start("preparing...")
         p = self.params()
-        wants_shadow = p.get("shadow", 0) > 0
 
         def work():
             try:
                 self.results.put(("prog", ("rendering at full resolution", 0.12)))
-                paths = core.render_full(p)
-                n = 2 if (wants_shadow and paths.get("shadow")) else 1
+                # Send overwrites its working files on purpose; a save the user
+                # asked for never overwrites the last one.
+                paths = core.render_full(p, unique=not send)
+                n = sum(1 for k in ("relit", "shadow", "glow") if paths.get(k))
                 if not send:
-                    self.results.put(("done", ("written:\n" + paths["relit"], "ok")))
+                    names = [os.path.basename(paths[k]) for k in ("relit", "shadow", "glow")
+                             if paths.get(k)]
+                    self.results.put(("done", ("written next to the subject:\n"
+                                               + "\n".join(names), "ok")))
                     return
                 # one stage, not two: a step posted immediately before another
                 # drains in the same pass and never gets painted
@@ -1318,13 +1454,14 @@ class App:
                 self.results.put(("done", (r.get("error") or r.get("msg"),
                                            "err" if r.get("error") else "ok")))
             except Exception:
-                self.results.put(("fail", traceback.format_exc(limit=3)))
+                self.results.put(("fail", traceback.format_exc()))
         self._bg(work)
 
     def _busy_ui(self, on):
         """Stop a second run being fired while one is in flight - Photoshop
         cannot service two of these at once and the second just times out."""
-        for b in (self.b_pull, self.b_cut, self.b_send, self.b_save_png):
+        for b in (self.b_pull, self.b_cut, self.b_send, self.b_save_png,
+                  self.b_save_comp):
             try:
                 b.set_enabled(not on)
             except Exception:
