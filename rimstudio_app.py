@@ -502,38 +502,57 @@ def pull_from_photoshop():
     script = """
 var doc = app.activeDocument;
 var subjName = doc.activeLayer.name;
+// Matched by id, not name: a plate can easily hold another "Layer 1" inside
+// some group. Layer ids survive doc.duplicate (checked in Photoshop 2026).
+var subjId = doc.activeLayer.id;
 var GEN = [%s];
+var SEND_GROUP = %s;
 function isGen(n){ for (var i=0;i<GEN.length;i++) if (n===GEN[i]) return true; return false; }
+function isSubj(L){ return L.id === subjId; }
+function drop(v) {
+    try { if (v.allLocked) v.allLocked = false; } catch (e) {}
+    // ONLY when it is actually clipped. Setting grouped=false on a layer
+    // that is not clipped fires "Release Clipping Mask", which Photoshop
+    // then reports as unavailable in a MODAL dialog - and a modal blocks
+    // every further scripted call until someone clicks OK.
+    try { if (v.typename !== "LayerSet" && v.grouped) v.grouped = false; } catch (e) {}
+    try { v.remove(); } catch (e2) { try { v.visible = false; } catch (e3) {} }
+}
+// Walk groups instead of discarding them: a plate built inside groups, or a
+// subject that lives in one, used to vanish because every layer set was
+// deleted outright. The same keep rules apply at every depth; a group is kept
+// if anything inside it survives, and our own send group never is.
+function prune(c, keepSubject) {
+    for (var i = c.layers.length - 1; i >= 0; i--) {
+        var v = c.layers[i];
+        if (v.typename === "LayerSet") {
+            if (v.name === SEND_GROUP) { drop(v); continue; }
+            prune(v, keepSubject);
+            if (!v.layers.length) { drop(v); continue; }
+            try { if (v.allLocked) v.allLocked = false; } catch (e) {}
+            v.visible = true; v.opacity = 100;
+            continue;
+        }
+        var keep = keepSubject ? isSubj(v) : (!isSubj(v) && !isGen(v.name));
+        if (!keep) { drop(v); continue; }
+        try { if (v.grouped) v.grouped = false; } catch (e) {}
+        try { if (v.allLocked) v.allLocked = false; } catch (e) {}
+        v.visible = true; v.opacity = 100; v.blendMode = BlendMode.NORMAL;
+    }
+}
+function plateCount(c) {
+    var n = 0;
+    for (var i = 0; i < c.layers.length; i++) {
+        var v = c.layers[i];
+        if (v.typename === "LayerSet") { if (v.name !== SEND_GROUP) n += plateCount(v); }
+        else if (!isSubj(v) && !isGen(v.name) && v.visible) n++;
+    }
+    return n;
+}
 function dump(keepSubject, path, flatten) {
     var d = doc.duplicate(doc.name + " _rs", false);
     app.activeDocument = d;
-    var guard = 0, skip = {};
-    while (guard++ < 80) {
-        var v = null;
-        for (var i = 0; i < d.artLayers.length; i++) {
-            var nm = d.artLayers[i].name;
-            var keep = skip[nm] ? true : (keepSubject ? (nm === subjName)
-                                                      : (nm !== subjName && !isGen(nm)));
-            if (!keep) { v = d.artLayers[i]; break; }
-        }
-        if (!v) { for (var k = 0; k < d.layerSets.length; k++)
-                    if (!skip["S:" + d.layerSets[k].name]) { v = d.layerSets[k]; break; } }
-        if (!v) break;
-        try { if (v.allLocked) v.allLocked = false; } catch (e) {}
-        // ONLY when it is actually clipped. Setting grouped=false on a layer
-        // that is not clipped fires "Release Clipping Mask", which Photoshop
-        // then reports as unavailable in a MODAL dialog - and a modal blocks
-        // every further scripted call until someone clicks OK.
-        try { if (v.grouped) v.grouped = false; } catch (e) {}
-        try { v.remove(); } catch (e2) { skip[(v.typename==="LayerSet"?"S:":"") + v.name] = 1;
-                                         try { v.visible = false; } catch (e3) {} }
-    }
-    for (var j = 0; j < d.artLayers.length; j++) {
-        var L = d.artLayers[j];
-        try { if (L.grouped) L.grouped = false; } catch (e) {}
-        try { if (L.allLocked) L.allLocked = false; } catch (e) {}
-        L.visible = true; L.opacity = 100; L.blendMode = BlendMode.NORMAL;
-    }
+    prune(d, keepSubject);
     if (flatten) d.flatten();
     // The engine's maths - sRGB<->linear, Lab, the whole grade - assumes sRGB.
     // An Adobe RGB or ProPhoto document would hand over numbers that mean
@@ -555,22 +574,19 @@ if (!app.documents.length) { "NO DOC" } else {
   // layer, which Photoshop refuses; it then hides it and flattens to white.
   // That produced a blank plate after 86 SECONDS of grinding, with no hint
   // that the document was the problem. Check first and say so in a moment.
-  var plate = 0;
-  for (var pi = 0; pi < doc.artLayers.length; pi++) {
-      var pn = doc.artLayers[pi].name;
-      if (pn !== subjName && !isGen(pn) && doc.artLayers[pi].visible) plate++;
-  }
-  plate += doc.layerSets.length;
-  if (plate === 0) { "NO PLATE|" + subjName } else {
+  var plate = plateCount(doc);
+  if (doc.activeLayer.typename === "LayerSet") { "IS GROUP" } else if (plate === 0) { "NO PLATE|" + subjName } else {
     dump(true,  "%s", false);
     dump(false, "%s", true);
     "OK|" + subjName + "|" + prof;
   }
 }
-""" % (",".join('"%s"' % g for g in generated), sub, bg)
+""" % (",".join('"%s"' % g for g in generated), json.dumps(SEND_GROUP), sub, bg)
     out = run_jsx(script)
     if "NO DOC" in out:
         return {"error": "Photoshop has no document open."}
+    if "IS GROUP" in out:
+        return {"error": "Select the subject's pixel layer, not a group."}
     if out.startswith("NO PLATE"):
         who = out.split("|", 1)[1].strip() if "|" in out else "the active layer"
         return {"error": 'Nothing behind "%s" to use as a background.\n'
